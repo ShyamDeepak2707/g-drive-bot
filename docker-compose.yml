@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./sessions:/app/sessions
+      - ./downloads:/app/downloads
+      - ./credentials.json:/app/credentials.json:ro
+    restart: unless-stopped

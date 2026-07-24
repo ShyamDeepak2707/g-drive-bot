@@ -1,0 +1,25 @@
+name: telegram-drive-manager
+services:
+  - name: bot
+    type: worker
+    docker:
+      dockerfile: Dockerfile
+    env:
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: TELEGRAM_BOT_TOKEN
+        scope: runtime
+      - key: PYROGRAM_API_ID
+        scope: runtime
+      - key: PYROGRAM_API_HASH
+        scope: runtime
+      - key: GOOGLE_CREDENTIALS_FILE
+        value: /app/credentials.json
+      - key: GOOGLE_TOKEN_FILE
+        value: /app/data/token.json
+      - key: GOOGLE_AUTO_AUTH
+        value: "false"
+      - key: SQLITE_DB_PATH
+        value: /app/data/app.sqlite3

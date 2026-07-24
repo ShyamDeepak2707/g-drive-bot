@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.db
+*.log
+logs/
+tmp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+credentials.json
+token.json
+sessions/
+downloads/
