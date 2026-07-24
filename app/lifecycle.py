@@ -4,15 +4,16 @@ import asyncio
 import contextlib
 import signal
 
-from pyrogram import Client
 from telegram.ext import Application
 
 from app.config import load_settings
 from app.database import DatabaseRepository, SQLiteDatabase
+from app.download_manager import DownloadManager
+from app.download_queue import DownloadQueue
 from app.drive.auth import get_drive_service
 from app.exceptions import TelegramError
 from app.logging_config import configure_logging, get_logger
-from app.pyrogram_client import create_pyrogram_client
+from app.pyrogram_client import PyrogramSessionManager, create_pyrogram_client
 from app.services import ApplicationContainer
 from app.task_manager import AsyncTaskManager
 from app.telegram_bot import create_application, register_handlers
@@ -36,9 +37,24 @@ async def startup() -> ApplicationContainer:
         logger.info("google drive authentication pending", extra={"event": "google_pending"})
 
     telegram_application = create_application(settings)
+    download_manager: DownloadManager | None = None
+    download_queue: DownloadQueue | None = None
+    if pyrogram_client is not None:
+        download_manager = DownloadManager(
+            session=pyrogram_client,
+            download_dir=settings.downloads_dir,
+            temp_dir=settings.temp_dir,
+        )
+        download_queue = DownloadQueue(
+            repository=repository,
+            download_manager=download_manager,
+            bot=telegram_application.bot,
+            logger=get_logger("app.download_queue"),
+        )
     register_handlers(
         application=telegram_application,
         repository=repository,
+        download_queue=download_queue,
         logger=get_logger("app.telegram_bot"),
     )
 
@@ -49,6 +65,8 @@ async def startup() -> ApplicationContainer:
         repository=repository,
         task_manager=task_manager,
         pyrogram_client=pyrogram_client,
+        download_manager=download_manager,
+        download_queue=download_queue,
         drive_service=drive_service,
         telegram_application=telegram_application,
     )
@@ -75,6 +93,7 @@ async def shutdown(container: ApplicationContainer | None) -> None:
     logger = container.logger
     logger.info("shutdown started", extra={"event": "shutdown_started"})
 
+    await _stop_download_queue(container.download_queue)
     await _stop_telegram(container.telegram_application)
     await _stop_pyrogram(container.pyrogram_client)
     await container.task_manager.shutdown()
@@ -91,6 +110,8 @@ async def run() -> None:
         if container.telegram_application is None:
             raise TelegramError("Telegram application was not created.")
         await start_telegram(container.telegram_application)
+        if container.download_queue is not None:
+            container.download_queue.start()
         container.logger.info("telegram started", extra={"event": "telegram_started"})
         await _wait_for_shutdown_signal()
     finally:
@@ -109,10 +130,16 @@ async def _stop_telegram(application: Application | None) -> None:
         await application.shutdown()
 
 
-async def _stop_pyrogram(client: Client | None) -> None:
+async def _stop_download_queue(queue: DownloadQueue | None) -> None:
+    if queue is None:
+        return
+    await queue.stop()
+
+
+async def _stop_pyrogram(client: PyrogramSessionManager | None) -> None:
     if client is None:
         return
-    if client.is_connected:
+    if client.is_running():
         await client.stop()
 
 

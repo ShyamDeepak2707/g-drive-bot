@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.exceptions import ConfigurationError
-from app.utils.validators import parse_optional_int, validate_bot_token, validate_log_level
+from app.exceptions import ConfigurationError, RenameValidationError
+from app.utils.validators import (
+    parse_optional_int,
+    validate_bot_token,
+    validate_filename,
+    validate_log_level,
+)
 
 
 def test_validate_bot_token_accepts_telegram_shape() -> None:
@@ -22,3 +27,9 @@ def test_parse_optional_int() -> None:
 
 def test_validate_log_level_normalizes() -> None:
     assert validate_log_level("info") == "INFO"
+
+
+def test_validate_filename() -> None:
+    assert validate_filename("report.pdf") == "report.pdf"
+    with pytest.raises(RenameValidationError):
+        validate_filename("../report.pdf")

@@ -19,3 +19,11 @@ class GoogleDriveError(AppError):
 
 class TelegramError(AppError):
     """Raised when Telegram bot initialization or runtime fails."""
+
+
+class DownloadError(AppError):
+    """Raised when a Telegram media download fails."""
+
+
+class RenameValidationError(AppError):
+    """Raised when a user-provided filename is invalid."""

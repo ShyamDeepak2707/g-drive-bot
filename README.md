@@ -1,6 +1,6 @@
 # Telegram to Google Drive Manager
 
-Production-ready foundation for a Python 3.12 Telegram bot that will manage Google Drive workflows. Milestone 1 intentionally includes infrastructure only: `/start`, service initialization, persistence, and deployment scaffolding. File upload features are not implemented yet.
+Production-ready foundation for a Python 3.12 Telegram bot that will manage Google Drive workflows. Milestone 2 receives Telegram files, stores metadata, downloads media through Pyrogram, and prepares a rename decision. Google Drive upload features are not implemented yet.
 
 ## Features
 
@@ -13,6 +13,9 @@ Production-ready foundation for a Python 3.12 Telegram bot that will manage Goog
 - Structured console and rotating file logging
 - Configuration validation with friendly errors
 - Async task manager for future upload queues
+- Telegram file reception for documents, videos, audio, photos, animations, and voice messages
+- Pyrogram-backed download manager with temporary files, unique filenames, cleanup, retry, and progress updates
+- Rename workflow: keep original filename, rename, or skip
 - Docker, Docker Compose, and Koyeb worker support
 - Ruff, Black, mypy, pre-commit, and tests
 
@@ -26,6 +29,10 @@ Production-ready foundation for a Python 3.12 Telegram bot that will manage Goog
 │   ├── exceptions.py
 │   ├── lifecycle.py
 │   ├── logging_config.py
+│   ├── download_manager.py
+│   ├── download_queue.py
+│   ├── models.py
+│   ├── progress.py
 │   ├── pyrogram_client.py
 │   ├── services.py
 │   ├── task_manager.py
@@ -115,6 +122,31 @@ python main.py
 ```
 
 Send `/start` to the bot in Telegram. The app initializes SQLite, Pyrogram, Google Drive auth state, and Telegram polling.
+
+## File Reception Pipeline
+
+Supported Telegram media:
+
+- document
+- video
+- audio
+- photo
+- animation
+- voice
+
+When a supported file is received, the bot:
+
+1. Extracts file metadata.
+2. Stores user, file, and download records in SQLite.
+3. Acknowledges receipt.
+4. Queues a single-worker async download job.
+5. Downloads via Pyrogram into a temporary `.part` file.
+6. Moves the completed file into `downloads/` with a unique filename.
+7. Updates progress every few seconds.
+8. Prompts the user to keep the original filename, rename, or skip.
+9. Marks the file `ready_for_upload` for a future Google Drive milestone.
+
+No Google Drive upload is performed in this milestone.
 
 ## Docker
 

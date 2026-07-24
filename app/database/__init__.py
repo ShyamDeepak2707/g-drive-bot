@@ -1,4 +1,4 @@
 from app.database.connection import SQLiteDatabase
-from app.database.repository import DatabaseRepository, FileRecord, UserRecord
+from app.database.repository import DatabaseRepository, DownloadRecord, FileRecord, UserRecord
 
-__all__ = ["DatabaseRepository", "FileRecord", "SQLiteDatabase", "UserRecord"]
+__all__ = ["DatabaseRepository", "DownloadRecord", "FileRecord", "SQLiteDatabase", "UserRecord"]

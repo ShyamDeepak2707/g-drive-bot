@@ -4,7 +4,10 @@ import sqlite3
 from pathlib import Path
 from types import TracebackType
 
-from app.constants import FILE_STATUS_PENDING
+from app.constants import (
+    DOWNLOAD_STATUS_QUEUED,
+    FILE_STATUS_RECEIVED,
+)
 from app.exceptions import DatabaseError
 from app.logging_config import get_logger
 from app.utils.filesystem import ensure_parent_directory
@@ -22,15 +25,44 @@ CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     telegram_file_id TEXT NOT NULL,
+    message_id INTEGER,
+    chat_id INTEGER,
     google_drive_file_id TEXT,
     original_name TEXT,
     mime_type TEXT,
-    status TEXT NOT NULL DEFAULT '{FILE_STATUS_PENDING}',
+    size INTEGER,
+    extension TEXT,
+    file_type TEXT,
+    status TEXT NOT NULL DEFAULT '{FILE_STATUS_RECEIVED}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE TABLE IF NOT EXISTS downloads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL UNIQUE,
+    local_path TEXT,
+    temp_path TEXT,
+    bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER,
+    progress_percent INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT '{DOWNLOAD_STATUS_QUEUED}',
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES files(id)
+);
 """
+
+FILE_COLUMN_MIGRATIONS = {
+    "message_id": "ALTER TABLE files ADD COLUMN message_id INTEGER",
+    "chat_id": "ALTER TABLE files ADD COLUMN chat_id INTEGER",
+    "size": "ALTER TABLE files ADD COLUMN size INTEGER",
+    "extension": "ALTER TABLE files ADD COLUMN extension TEXT",
+    "file_type": "ALTER TABLE files ADD COLUMN file_type TEXT",
+}
 
 
 class SQLiteDatabase:
@@ -60,6 +92,7 @@ class SQLiteDatabase:
     def initialize(self) -> None:
         self.connect()
         self.executescript(SCHEMA)
+        self._apply_migrations()
         self.commit()
         self._logger.info("database initialized", extra={"event": "database_initialized"})
 
@@ -121,3 +154,9 @@ class SQLiteDatabase:
         if self._connection is None:
             raise DatabaseError("SQLite database is not connected.")
         return self._connection
+
+    def _apply_migrations(self) -> None:
+        existing_columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(files)")}
+        for column, migration_sql in FILE_COLUMN_MIGRATIONS.items():
+            if column not in existing_columns:
+                self.execute(migration_sql)

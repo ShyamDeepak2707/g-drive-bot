@@ -3,10 +3,20 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from app.exceptions import ConfigurationError
+from app.constants import FILENAME_MAX_LENGTH
+from app.exceptions import ConfigurationError, RenameValidationError
 
 BOT_TOKEN_PATTERN = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 def require_non_empty(value: str | None, name: str) -> str:
@@ -62,3 +72,23 @@ def validate_readable_file(path: Path, label: str) -> Path:
     if not path.is_file():
         raise ConfigurationError(f"{label} must point to a file, got '{path}'.")
     return path
+
+
+def validate_filename(filename: str) -> str:
+    normalized = filename.strip()
+    if normalized == "":
+        raise RenameValidationError("Filename cannot be empty.")
+    if normalized in {".", ".."}:
+        raise RenameValidationError("Filename cannot be a relative path.")
+    if INVALID_FILENAME_CHARS.search(normalized):
+        raise RenameValidationError(
+            'Filename cannot contain < > : " / \\ | ? * or control characters.'
+        )
+    if normalized.endswith(".") or normalized.endswith(" "):
+        raise RenameValidationError("Filename cannot end with a space or dot.")
+    if len(normalized) > FILENAME_MAX_LENGTH:
+        raise RenameValidationError(f"Filename must be {FILENAME_MAX_LENGTH} characters or fewer.")
+    stem = normalized.split(".", maxsplit=1)[0].upper()
+    if stem in WINDOWS_RESERVED_NAMES:
+        raise RenameValidationError(f"'{normalized}' is reserved by Windows.")
+    return normalized

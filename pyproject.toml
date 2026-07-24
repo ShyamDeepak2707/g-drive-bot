@@ -18,7 +18,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["ASYNC", "B", "E", "F", "I", "UP"]
-ignore = ["E501"]
+ignore = ["ASYNC240", "E501"]
 
 [tool.mypy]
 python_version = "3.12"
