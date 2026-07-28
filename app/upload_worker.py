@@ -156,6 +156,7 @@ class UploadWorker:
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
         self._current_file_record: FileRecord | None = None
+        self._cancelled_file_ids: set[int] = set()
         self._completed_since_startup = 0
         self._failed_since_startup = 0
         self._task: asyncio.Task[None] | None = None
@@ -197,6 +198,37 @@ class UploadWorker:
             is_busy=current_upload is not None
             or (self._task is not None and not self._task.done()),
         )
+
+    def cancel(self, file_record_id: int, source: str = "manual") -> bool:
+        file_record = self._repository.get_file_record(file_record_id)
+        if file_record is None:
+            return False
+        if file_record.status == constants.FILE_STATUS_CANCELLED:
+            return True
+        if file_record.status not in {
+            constants.FILE_STATUS_READY_FOR_UPLOAD,
+            constants.FILE_STATUS_UPLOADING,
+        }:
+            return False
+        self._cancelled_file_ids.add(file_record_id)
+        cancelled = self._repository.cancel_upload(file_record_id)
+        active = (
+            self._current_file_record is not None and self._current_file_record.id == file_record_id
+        )
+        if not active:
+            with contextlib.suppress(OSError):
+                self._cleanup_uploaded_files(file_record_id)
+        self._logger.info(
+            "upload cancellation requested",
+            extra={
+                "event": "upload_cancellation_requested",
+                "file_record_id": file_record_id,
+                "source": source,
+                "active": active,
+                "status": cancelled.status if cancelled else None,
+            },
+        )
+        return cancelled is not None and cancelled.status == constants.FILE_STATUS_CANCELLED
 
     async def run_once(self) -> None:
         processed = await self._process_next_eligible_job(deferred_file_ids=set())
@@ -349,6 +381,9 @@ class UploadWorker:
             return
         updated = self._repository.clear_upload_retry_schedule(updated.id) or updated
         self._current_file_record = updated
+        if self._is_cancel_requested(updated.id):
+            self._mark_upload_cancelled(updated.id, source="pre_upload")
+            return
 
         self._logger.info(
             "upload started",
@@ -365,8 +400,14 @@ class UploadWorker:
         try:
             upload_input = self._resolve_upload_input(updated)
             uploaded_file = await asyncio.to_thread(self._upload, upload_input)
+            if self._is_cancel_requested(updated.id):
+                self._mark_upload_cancelled(updated.id, source="post_upload")
+                return
             self._verify_upload(uploaded_file, upload_input.expected_size, updated.id)
         except Exception as exc:
+            if self._is_cancel_requested(updated.id):
+                self._mark_upload_cancelled(updated.id, source="upload_exception")
+                return
             self._handle_upload_failure(updated, exc)
             return
 
@@ -647,6 +688,26 @@ class UploadWorker:
                 continue
             seen.add(path)
             _delete_file_if_present(path)
+
+    def _is_cancel_requested(self, file_record_id: int) -> bool:
+        file_record = self._repository.get_file_record(file_record_id)
+        return file_record_id in self._cancelled_file_ids or (
+            file_record is not None and file_record.status == constants.FILE_STATUS_CANCELLED
+        )
+
+    def _mark_upload_cancelled(self, file_record_id: int, *, source: str) -> None:
+        self._cancelled_file_ids.add(file_record_id)
+        cancelled = self._repository.cancel_upload(file_record_id)
+        self._cleanup_uploaded_files(file_record_id)
+        self._logger.info(
+            "upload cancelled",
+            extra={
+                "event": "upload_cancelled",
+                "file_record_id": file_record_id,
+                "source": source,
+                "status": cancelled.status if cancelled else None,
+            },
+        )
 
 
 def _parse_drive_size(value: object) -> int | None:

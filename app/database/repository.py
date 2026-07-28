@@ -89,6 +89,18 @@ class InterruptedDownloadRecord:
     download: DownloadRecord
 
 
+@dataclass(frozen=True)
+class RepositoryStatistics:
+    total_tracked_files: int
+    completed_downloads: int
+    completed_uploads: int
+    failed_downloads: int
+    failed_uploads: int
+    download_retry_attempts: int
+    upload_retry_attempts: int
+    scheduled_upload_retries: int
+
+
 class DatabaseRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self._database = database
@@ -266,6 +278,85 @@ class DatabaseRepository:
             (FILE_STATUS_FAILED, row_limit),
         )
         return tuple(_file_record_from_row(row) for row in rows)
+
+    def runtime_statistics(self) -> RepositoryStatistics:
+        row = self._database.fetch_one(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM files) AS total_tracked_files,
+                (
+                    SELECT COUNT(*)
+                    FROM downloads
+                    WHERE status = ?
+                ) AS completed_downloads,
+                (
+                    SELECT COUNT(*)
+                    FROM files
+                    WHERE status IN (?, ?)
+                      AND google_drive_file_id IS NOT NULL
+                ) AS completed_uploads,
+                (
+                    SELECT COUNT(*)
+                    FROM downloads
+                    WHERE status = ?
+                ) AS failed_downloads,
+                (
+                    SELECT COUNT(*)
+                    FROM files AS failed_files
+                    WHERE failed_files.status = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM downloads AS failed_downloads
+                          WHERE failed_downloads.file_id = failed_files.id
+                            AND failed_downloads.status = ?
+                      )
+                ) AS failed_uploads,
+                (
+                    SELECT COALESCE(SUM(retry_count), 0)
+                    FROM downloads
+                ) AS download_retry_attempts,
+                (
+                    SELECT COALESCE(SUM(upload_retry_count), 0)
+                    FROM files
+                ) AS upload_retry_attempts,
+                (
+                    SELECT COUNT(*)
+                    FROM files
+                    WHERE status = ?
+                      AND upload_retry_after IS NOT NULL
+                ) AS scheduled_upload_retries
+            """,
+            (
+                DOWNLOAD_STATUS_COMPLETED,
+                FILE_STATUS_UPLOADED,
+                FILE_STATUS_COMPLETED,
+                DOWNLOAD_STATUS_FAILED,
+                FILE_STATUS_FAILED,
+                DOWNLOAD_STATUS_FAILED,
+                FILE_STATUS_READY_FOR_UPLOAD,
+            ),
+        )
+        if row is None:
+            return RepositoryStatistics(
+                total_tracked_files=0,
+                completed_downloads=0,
+                completed_uploads=0,
+                failed_downloads=0,
+                failed_uploads=0,
+                download_retry_attempts=0,
+                upload_retry_attempts=0,
+                scheduled_upload_retries=0,
+            )
+        return RepositoryStatistics(
+            total_tracked_files=int(row["total_tracked_files"]),
+            completed_downloads=int(row["completed_downloads"]),
+            completed_uploads=int(row["completed_uploads"]),
+            failed_downloads=int(row["failed_downloads"]),
+            failed_uploads=int(row["failed_uploads"]),
+            download_retry_attempts=int(row["download_retry_attempts"]),
+            upload_retry_attempts=int(row["upload_retry_attempts"]),
+            scheduled_upload_retries=int(row["scheduled_upload_retries"]),
+        )
 
     def list_download_records_with_paths(self) -> tuple[DownloadRecord, ...]:
         rows = self._database.fetch_all("""
@@ -571,6 +662,23 @@ class DatabaseRepository:
         self.update_file_status(file_id, FILE_STATUS_QUEUED)
         return self.get_download(file_id)
 
+    def requeue_failed_download(self, file_id: int) -> DownloadRecord | None:
+        self._database.execute(
+            """
+            UPDATE downloads
+            SET bytes_downloaded = 0,
+                progress_percent = 0,
+                status = ?,
+                error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE file_id = ?
+            """,
+            (DOWNLOAD_STATUS_QUEUED, "Retried by admin command.", file_id),
+        )
+        self._database.commit()
+        self.update_file_status(file_id, FILE_STATUS_QUEUED)
+        return self.get_download(file_id)
+
     def update_download_progress(
         self,
         file_id: int,
@@ -677,6 +785,45 @@ class DatabaseRepository:
         self._database.commit()
         self.update_file_status(file_id, FILE_STATUS_CANCELLED)
         return self.get_download(file_id)
+
+    def cancel_download(self, file_id: int) -> DownloadRecord | None:
+        download = self.get_download(file_id)
+        if download is None:
+            return None
+        if download.status in {
+            DOWNLOAD_STATUS_COMPLETED,
+            DOWNLOAD_STATUS_FAILED,
+            DOWNLOAD_STATUS_CANCELLED,
+        }:
+            return download
+        return self.mark_download_cancelled(file_id, download.retry_count)
+
+    def cancel_upload(self, file_id: int) -> FileRecord | None:
+        file_record = self.get_file_record(file_id)
+        if file_record is None:
+            return None
+        if file_record.status in {
+            FILE_STATUS_COMPLETED,
+            FILE_STATUS_UPLOADED,
+            FILE_STATUS_FAILED,
+            FILE_STATUS_CANCELLED,
+            FILE_STATUS_SKIPPED,
+        }:
+            return file_record
+        require_transition(JobState(file_record.status), JobState.CANCELLED)
+        self._database.execute(
+            """
+            UPDATE files
+            SET status = ?,
+                upload_retry_after = NULL,
+                upload_error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (FILE_STATUS_CANCELLED, "Upload cancelled.", file_id),
+        )
+        self._database.commit()
+        return self.get_file_record(file_id)
 
     def add_favorite_folder(self, user_id: int, folder: Folder) -> Folder:
         self._database.execute(

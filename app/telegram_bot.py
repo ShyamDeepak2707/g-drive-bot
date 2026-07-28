@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 
 from app import constants
+from app.admin_commands import AdminCommandService
 from app.config import Settings
 from app.database import DatabaseRepository, UserRecord
 from app.download_queue import DownloadJob, DownloadQueue, DownloadQueueSnapshot
@@ -39,11 +40,14 @@ from app.utils.time_utils import utc_now_iso
 from app.utils.validators import validate_filename
 
 REPOSITORY_KEY = "repository"
+SETTINGS_KEY = "settings"
 LOGGER_KEY = "logger"
 DOWNLOAD_QUEUE_KEY = "download_queue"
 UPLOAD_WORKER_KEY = "upload_worker"
+ADMIN_COMMAND_SERVICE_KEY = "admin_command_service"
 FOLDER_BROWSER_KEY = "folder_browser"
 FOLDER_RECENT_LIMIT_KEY = "folder_recent_limit"
+ADMIN_USER_IDS_KEY = "admin_user_ids"
 PENDING_RENAME_KEY = "pending_rename_file_id"
 PENDING_FOLDER_FILE_KEY = "pending_folder_file_id"
 PENDING_FOLDER_ID_KEY = "pending_folder_id_file_id"
@@ -63,8 +67,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     name = user.first_name if user and user.first_name else "there"
     message = (
-        f"Hi {name}. Send me files and I will be able to organize them in "
-        "Google Drive once uploads are enabled."
+        f"Hi {name}. Send me files and I will download them, let you choose a "
+        "Google Drive folder, and upload them there."
     )
 
     if update.message is None:
@@ -82,10 +86,112 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(message)
 
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/help received without a message payload")
+        return
+
+    help_message = _format_help_message(
+        is_admin=user is not None and _is_admin_user(context, user.id),
+    )
+    await message.reply_text(
+        help_message.text,
+        parse_mode=help_message.parse_mode,
+        disable_web_page_preview=help_message.disable_web_page_preview,
+    )
+
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
+        _get_logger(context).warning("/ping received without a message payload")
+        return
+
+    ping_message = _format_ping_message()
+    await message.reply_text(
+        ping_message.text,
+        parse_mode=ping_message.parse_mode,
+        disable_web_page_preview=ping_message.disable_web_page_preview,
+    )
+
+
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/id received without a message payload")
+        return
+
+    id_message = _format_id_message(
+        user_id=user.id if user is not None else None,
+        chat_id=message.chat_id,
+    )
+    await message.reply_text(
+        id_message.text,
+        parse_mode=id_message.parse_mode,
+        disable_web_page_preview=id_message.disable_web_page_preview,
+    )
+
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/settings received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /settings command rejected",
+            extra={
+                "event": "settings_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    settings_message = _format_settings_message(_get_settings(context))
+    await message.reply_text(
+        settings_message.text,
+        parse_mode=settings_message.parse_mode,
+        disable_web_page_preview=settings_message.disable_web_page_preview,
+    )
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
         _get_logger(context).warning("/cancel received without a message payload")
+        return
+    if _admin_cancel_requested(context):
+        if user is None or not _is_admin_user(context, user.id):
+            _get_logger(context).warning(
+                "unauthorized admin /cancel command rejected",
+                extra={
+                    "event": "cancel_job_command_unauthorized",
+                    "telegram_user_id": getattr(user, "id", None),
+                },
+            )
+            await message.reply_text("Unauthorized.")
+            return
+        cancel_arguments = _cancel_command_arguments(context)
+        if cancel_arguments is None:
+            await message.reply_text("Usage: /cancel <job_id> [download|upload]")
+            return
+        job_id, job_type = cancel_arguments
+        cancel_message = _get_admin_command_service(context).cancel_job(
+            admin_user_id=user.id,
+            job_id=job_id,
+            job_type=job_type,
+        )
+        await message.reply_text(
+            cancel_message.text,
+            parse_mode=cancel_message.parse_mode,
+            disable_web_page_preview=cancel_message.disable_web_page_preview,
+        )
         return
 
     cancelled_state = False
@@ -135,10 +241,199 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/health received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /health command rejected",
+            extra={
+                "event": "health_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    health_message = _get_admin_command_service(context).health()
+    await message.reply_text(
+        health_message.text,
+        parse_mode=health_message.parse_mode,
+        disable_web_page_preview=health_message.disable_web_page_preview,
+    )
+
+
+async def queues_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/queues received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /queues command rejected",
+            extra={
+                "event": "queues_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    queues_message = _get_admin_command_service(context).queues()
+    await message.reply_text(
+        queues_message.text,
+        parse_mode=queues_message.parse_mode,
+        disable_web_page_preview=queues_message.disable_web_page_preview,
+    )
+
+
+async def failed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/failed received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /failed command rejected",
+            extra={
+                "event": "failed_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    failed_message = _get_admin_command_service(context).failed()
+    await message.reply_text(
+        failed_message.text,
+        parse_mode=failed_message.parse_mode,
+        disable_web_page_preview=failed_message.disable_web_page_preview,
+    )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/stats received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /stats command rejected",
+            extra={
+                "event": "stats_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    stats_message = _get_admin_command_service(context).stats()
+    await message.reply_text(
+        stats_message.text,
+        parse_mode=stats_message.parse_mode,
+        disable_web_page_preview=stats_message.disable_web_page_preview,
+    )
+
+
+async def retry_failed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/retry_failed received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /retry_failed command rejected",
+            extra={
+                "event": "retry_failed_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    retry_message = _get_admin_command_service(context).retry_failed(user.id)
+    await message.reply_text(
+        retry_message.text,
+        parse_mode=retry_message.parse_mode,
+        disable_web_page_preview=retry_message.disable_web_page_preview,
+    )
+
+
+async def cleanup_temp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/cleanup_temp received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /cleanup_temp command rejected",
+            extra={
+                "event": "cleanup_temp_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    cleanup_message = _get_admin_command_service(context).cleanup_temp(
+        admin_user_id=user.id,
+        confirm=_cleanup_temp_confirmed(context),
+    )
+    await message.reply_text(
+        cleanup_message.text,
+        parse_mode=cleanup_message.parse_mode,
+        disable_web_page_preview=cleanup_message.disable_web_page_preview,
+    )
+
+
+async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        _get_logger(context).warning("/shutdown received without a message payload")
+        return
+    if user is None or not _is_admin_user(context, user.id):
+        _get_logger(context).warning(
+            "unauthorized /shutdown command rejected",
+            extra={
+                "event": "shutdown_command_unauthorized",
+                "telegram_user_id": getattr(user, "id", None),
+            },
+        )
+        await message.reply_text("Unauthorized.")
+        return
+
+    shutdown_message = _get_admin_command_service(context).shutdown(admin_user_id=user.id)
+    await message.reply_text(
+        shutdown_message.text,
+        parse_mode=shutdown_message.parse_mode,
+        disable_web_page_preview=shutdown_message.disable_web_page_preview,
+    )
+
+
 def bot_commands() -> tuple[BotCommand, ...]:
     return (
         BotCommand(constants.START_COMMAND, "Start the bot"),
+        BotCommand(constants.HELP_COMMAND, "Show available commands"),
+        BotCommand(constants.PING_COMMAND, "Check bot responsiveness"),
+        BotCommand(constants.ID_COMMAND, "Show your Telegram IDs"),
+        BotCommand(constants.SETTINGS_COMMAND, "Show safe runtime settings"),
         BotCommand(constants.STATUS_COMMAND, "Show download, upload, and queue status"),
+        BotCommand(constants.HEALTH_COMMAND, "Show system health"),
+        BotCommand(constants.QUEUES_COMMAND, "Inspect active and queued jobs"),
+        BotCommand(constants.FAILED_COMMAND, "Show failed jobs"),
+        BotCommand(constants.STATS_COMMAND, "Show operational statistics"),
+        BotCommand(constants.RETRY_FAILED_COMMAND, "Retry eligible failed jobs"),
+        BotCommand(constants.CLEANUP_TEMP_COMMAND, "Preview temporary file cleanup"),
+        BotCommand(constants.SHUTDOWN_COMMAND, "Gracefully shut down the bot"),
         BotCommand(constants.CANCEL_COMMAND, "Cancel the current action or download"),
     )
 
@@ -157,18 +452,36 @@ def register_handlers(
     download_queue: DownloadQueue | None,
     upload_worker: UploadWorker | None,
     folder_browser: DriveFolderBrowser | None,
+    admin_command_service: AdminCommandService,
+    admin_user_ids: tuple[int, ...],
     folder_recent_limit: int,
     logger: logging.Logger,
+    settings: Settings | None = None,
 ) -> None:
+    if settings is not None:
+        application.bot_data[SETTINGS_KEY] = settings
     application.bot_data[REPOSITORY_KEY] = repository
     application.bot_data[DOWNLOAD_QUEUE_KEY] = download_queue
     application.bot_data[UPLOAD_WORKER_KEY] = upload_worker
+    application.bot_data[ADMIN_COMMAND_SERVICE_KEY] = admin_command_service
     application.bot_data[FOLDER_BROWSER_KEY] = folder_browser
     application.bot_data[FOLDER_RECENT_LIMIT_KEY] = folder_recent_limit
+    application.bot_data[ADMIN_USER_IDS_KEY] = admin_user_ids
     application.bot_data[LOGGER_KEY] = logger
     application.add_handler(CommandHandler(constants.START_COMMAND, start_command))
+    application.add_handler(CommandHandler(constants.HELP_COMMAND, help_command))
+    application.add_handler(CommandHandler(constants.PING_COMMAND, ping_command))
+    application.add_handler(CommandHandler(constants.ID_COMMAND, id_command))
+    application.add_handler(CommandHandler(constants.SETTINGS_COMMAND, settings_command))
     application.add_handler(CommandHandler(constants.CANCEL_COMMAND, cancel_command))
     application.add_handler(CommandHandler(constants.STATUS_COMMAND, status_command))
+    application.add_handler(CommandHandler(constants.HEALTH_COMMAND, health_command))
+    application.add_handler(CommandHandler(constants.QUEUES_COMMAND, queues_command))
+    application.add_handler(CommandHandler(constants.FAILED_COMMAND, failed_command))
+    application.add_handler(CommandHandler(constants.STATS_COMMAND, stats_command))
+    application.add_handler(CommandHandler(constants.RETRY_FAILED_COMMAND, retry_failed_command))
+    application.add_handler(CommandHandler(constants.CLEANUP_TEMP_COMMAND, cleanup_temp_command))
+    application.add_handler(CommandHandler(constants.SHUTDOWN_COMMAND, shutdown_command))
     application.add_handler(
         MessageHandler(
             filters.Document.ALL
@@ -677,7 +990,9 @@ async def _send_browse_roots(
         [
             InlineKeyboardButton(
                 MY_DRIVE_NAME,
-                callback_data=_folder_callback(constants.FOLDER_ACTION_BROWSE, file_record_id, "my"),
+                callback_data=_folder_callback(
+                    constants.FOLDER_ACTION_BROWSE, file_record_id, "my"
+                ),
             )
         ]
     ]
@@ -979,6 +1294,101 @@ async def _refresh_current_folder_view(
     await _render_folder_view(update, context, file_record_id, folder_browser, view, refresh=True)
 
 
+def _format_help_message(*, is_admin: bool) -> TelegramMessage:
+    icons = Icons()
+    style = _utility_style(icons)
+    rows: list[tuple[str, str, object]] = [
+        (icons.file, "Send files", "Download, rename, choose folder, upload"),
+        (icons.status, "/status", "Show current pipeline state"),
+        (icons.worker, "/cancel", "Cancel the current action"),
+        (icons.info, "/id", "Show Telegram user and chat IDs"),
+        (icons.healthy, "/ping", "Check bot responsiveness"),
+    ]
+    if is_admin:
+        rows.extend(
+            (
+                (icons.folder, "/health", "Check subsystem health"),
+                (icons.queue, "/queues", "Inspect queued and active jobs"),
+                (icons.failed, "/failed", "Show failed jobs"),
+                (icons.progress, "/stats", "Show operational statistics"),
+                (icons.retrying, "/retry_failed", "Retry eligible failures"),
+                (icons.warning, "/cleanup_temp", "Preview temp cleanup"),
+                (icons.warning, "/shutdown", "Gracefully stop the bot"),
+            )
+        )
+    return status_card("Help", rows, style=style)
+
+
+def _format_ping_message() -> TelegramMessage:
+    icons = Icons()
+    return status_card(
+        "Bot Online",
+        (
+            (icons.healthy, "Status", "Responsive"),
+            (icons.info, "Mode", "Polling"),
+        ),
+        style=_utility_style(icons),
+    )
+
+
+def _format_id_message(*, user_id: int | None, chat_id: int) -> TelegramMessage:
+    icons = Icons()
+    return status_card(
+        "Telegram IDs",
+        (
+            (icons.info, "User ID", user_id if user_id is not None else "Unknown"),
+            (icons.queue, "Chat ID", chat_id),
+        ),
+        style=_utility_style(icons),
+    )
+
+
+def _format_settings_message(settings: Settings) -> TelegramMessage:
+    icons = Icons()
+    return status_card(
+        "Runtime Settings",
+        (
+            (icons.worker, "Environment", settings.app_env.title()),
+            (icons.info, "Log level", settings.log_level),
+            (icons.healthy, "Admins", len(settings.telegram_admin_user_ids)),
+            (
+                icons.download,
+                "Pyrogram",
+                "Configured" if settings.pyrogram_api_id is not None else "Not Configured",
+            ),
+            (
+                icons.download,
+                "Pyrogram concurrency",
+                settings.pyrogram_max_concurrent_transmissions,
+            ),
+            (icons.folder, "Google scopes", len(settings.google_scopes)),
+            (
+                icons.folder,
+                "Google auto auth",
+                "Enabled" if settings.google_auto_auth else "Disabled",
+            ),
+            (icons.queue, "Folder page size", settings.folder_browser_page_size),
+            (icons.queue, "Folder cache TTL", f"{settings.folder_browser_cache_ttl_seconds}s"),
+            (icons.folder, "Recent folders", settings.folder_recent_limit),
+            (icons.storage, "Downloads dir", _safe_path(settings.downloads_dir)),
+            (icons.storage, "Temp dir", _safe_path(settings.temp_dir)),
+        ),
+        style=_utility_style(icons),
+    )
+
+
+def _utility_style(icons: Icons) -> UIStyle:
+    return UIStyle(
+        separator=STATUS_MOBILE_SEPARATOR,
+        footer=f"{icons.updated} Updated just now",
+        icons=icons,
+    )
+
+
+def _safe_path(path: Path) -> str:
+    return path.name or str(path)
+
+
 def _format_system_status(
     download_snapshot: DownloadQueueSnapshot | None,
     upload_snapshot: UploadWorkerSnapshot | None,
@@ -1077,6 +1487,10 @@ def _get_repository(context: ContextTypes.DEFAULT_TYPE) -> DatabaseRepository:
     return cast(DatabaseRepository, context.application.bot_data[REPOSITORY_KEY])
 
 
+def _get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
+    return cast(Settings, context.application.bot_data[SETTINGS_KEY])
+
+
 def _get_download_queue(context: ContextTypes.DEFAULT_TYPE) -> DownloadQueue | None:
     return cast(DownloadQueue | None, context.application.bot_data[DOWNLOAD_QUEUE_KEY])
 
@@ -1085,12 +1499,47 @@ def _get_upload_worker(context: ContextTypes.DEFAULT_TYPE) -> UploadWorker | Non
     return cast(UploadWorker | None, context.application.bot_data[UPLOAD_WORKER_KEY])
 
 
+def _get_admin_command_service(context: ContextTypes.DEFAULT_TYPE) -> AdminCommandService:
+    return cast(
+        AdminCommandService,
+        context.application.bot_data[ADMIN_COMMAND_SERVICE_KEY],
+    )
+
+
+def _cleanup_temp_confirmed(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    args = getattr(context, "args", None) or ()
+    return any(str(arg).casefold() == "--confirm" for arg in args)
+
+
+def _admin_cancel_requested(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return bool(getattr(context, "args", None) or ())
+
+
+def _cancel_command_arguments(context: ContextTypes.DEFAULT_TYPE) -> tuple[int, str | None] | None:
+    args = [str(arg) for arg in (getattr(context, "args", None) or ())]
+    if not args:
+        return None
+    try:
+        job_id = int(args[0])
+    except ValueError:
+        return None
+    job_type = args[1].casefold() if len(args) > 1 else None
+    if job_type not in {None, "download", "upload"}:
+        return None
+    return job_id, job_type
+
+
 def _get_folder_browser(context: ContextTypes.DEFAULT_TYPE) -> DriveFolderBrowser | None:
     return cast(DriveFolderBrowser | None, context.application.bot_data[FOLDER_BROWSER_KEY])
 
 
 def _get_folder_recent_limit(context: ContextTypes.DEFAULT_TYPE) -> int:
     return int(context.application.bot_data[FOLDER_RECENT_LIMIT_KEY])
+
+
+def _is_admin_user(context: ContextTypes.DEFAULT_TYPE, telegram_user_id: int) -> bool:
+    admin_user_ids = cast(tuple[int, ...], context.application.bot_data.get(ADMIN_USER_IDS_KEY, ()))
+    return telegram_user_id in admin_user_ids
 
 
 def _get_logger(context: ContextTypes.DEFAULT_TYPE) -> logging.Logger:

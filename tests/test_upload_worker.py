@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.constants import (
+    FILE_STATUS_CANCELLED,
     FILE_STATUS_COMPLETED,
     FILE_STATUS_FAILED,
     FILE_STATUS_READY_FOR_UPLOAD,
@@ -282,6 +283,75 @@ def test_upload_worker_stop_waits_for_active_upload_to_persist_state(tmp_path: P
     assert snapshot.current_upload is None
     assert snapshot.completed_since_startup == 1
     assert snapshot.failed_since_startup == 0
+    database.close()
+
+
+def test_upload_worker_cancels_queued_upload(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    file_record = _ready_file(repository, local_path=local_path)
+    worker = UploadWorker(repository, logging.getLogger("test.upload_worker"), FakeUploader())
+
+    assert worker.cancel(file_record.id, source="test") is True
+
+    updated = repository.get_file_record(file_record.id)
+    assert updated is not None
+    assert updated.status == FILE_STATUS_CANCELLED
+    assert not local_path.exists()
+    database.close()
+
+
+def test_upload_worker_cancels_running_upload_cooperatively(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    file_record = _ready_file(repository, local_path=local_path)
+    uploader = BlockingUploader()
+    worker = UploadWorker(repository, logging.getLogger("test.upload_worker"), uploader)
+
+    async def scenario() -> None:
+        worker.start()
+        assert await asyncio.to_thread(uploader.started.wait, 2)
+        assert worker.cancel(file_record.id, source="test") is True
+        uploader.release.set()
+        if worker._task is not None:  # noqa: SLF001
+            await asyncio.wait_for(worker._task, timeout=2)  # noqa: SLF001
+
+    asyncio.run(scenario())
+
+    updated = repository.get_file_record(file_record.id)
+    assert updated is not None
+    assert updated.status == FILE_STATUS_CANCELLED
+    assert updated.google_drive_file_id is None
+    assert uploader.calls == 1
+    assert not local_path.exists()
+    database.close()
+
+
+def test_upload_worker_recovery_ignores_cancelled_upload(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    file_record = _ready_file(repository, local_path=local_path)
+    repository.cancel_upload(file_record.id)
+    uploader = FakeUploader()
+    worker = UploadWorker(repository, logging.getLogger("test.upload_worker"), uploader)
+
+    summary = asyncio.run(worker.recover_interrupted_jobs())
+
+    updated = repository.get_file_record(file_record.id)
+    assert updated is not None
+    assert updated.status == FILE_STATUS_CANCELLED
+    assert summary.uploads_recovered == 0
+    assert summary.cleanup_recovered == 0
+    assert uploader.calls == 0
     database.close()
 
 

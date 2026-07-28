@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from googleapiclient.discovery import Resource
 from telegram.ext import Application
 
+from app.admin_commands import AdminCommandService
 from app.admin_service import AdminService
 from app.config import Settings
 from app.database import DatabaseRepository, SQLiteDatabase
@@ -14,6 +15,7 @@ from app.download_manager import DownloadManager
 from app.download_queue import DownloadQueue
 from app.drive.browser import DriveFolderBrowser
 from app.health import HealthService
+from app.shutdown_control import ShutdownController
 from app.startup_recovery import StartupRecoverySummary
 from app.task_manager import AsyncTaskManager
 from app.upload_worker import UploadWorker
@@ -54,6 +56,8 @@ class ApplicationContainer:
     startup_recovery_summary: StartupRecoverySummary | None = None
     health_service: HealthService | None = None
     admin_service: AdminService | None = None
+    admin_command_service: AdminCommandService | None = None
+    shutdown_controller: ShutdownController | None = None
     telegram_application: Application | None = None
     registry: ServiceRegistry = field(default_factory=ServiceRegistry)
 
@@ -81,5 +85,9 @@ class ApplicationContainer:
             self.registry.set("health_service", self.health_service)
         if self.admin_service is not None:
             self.registry.set("admin_service", self.admin_service)
+        if self.admin_command_service is not None:
+            self.registry.set("admin_command_service", self.admin_command_service)
+        if self.shutdown_controller is not None:
+            self.registry.set("shutdown_controller", self.shutdown_controller)
         if self.telegram_application is not None:
             self.registry.set("telegram_application", self.telegram_application)

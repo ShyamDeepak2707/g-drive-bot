@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import signal
 from datetime import UTC, datetime
 
 from telegram.ext import Application
 
+from app.admin_commands import AdminCommandService
 from app.admin_service import AdminService
 from app.config import load_settings
 from app.database import DatabaseRepository, SQLiteDatabase
@@ -19,20 +18,24 @@ from app.health import HealthService
 from app.logging_config import configure_logging, get_logger
 from app.pyrogram_client import PyrogramSessionManager, create_pyrogram_client
 from app.services import ApplicationContainer
+from app.shutdown_control import ShutdownController
 from app.startup_recovery import run_startup_recovery
 from app.startup_validation import validate_startup_configuration
 from app.task_manager import AsyncTaskManager
 from app.telegram_bot import configure_bot_commands, create_application, register_handlers
+from app.temp_files import TempFileService
 from app.upload_worker import GoogleDriveUploader, UploadWorker
 from app.utils.filesystem import cleanup_runtime_directory
 
 
-async def startup() -> ApplicationContainer:
+async def startup(shutdown_controller: ShutdownController | None = None) -> ApplicationContainer:
     startup_time = datetime.now(tz=UTC)
     settings = load_settings()
     configure_logging(settings.log_level, settings.log_file)
     logger = get_logger(__name__)
     logger.info("startup started", extra={"event": "startup_started"})
+    if shutdown_controller is None:
+        shutdown_controller = ShutdownController(logger=logger)
     cleanup_runtime_directory(settings.temp_dir, logger)
 
     database = SQLiteDatabase(settings.sqlite_db_path)
@@ -100,6 +103,10 @@ async def startup() -> ApplicationContainer:
         upload_worker=upload_worker,
         startup_recovery_summary=startup_recovery_summary,
     )
+    temp_file_service = TempFileService(
+        temp_dir=settings.temp_dir,
+        downloads_dir=settings.downloads_dir,
+    )
     admin_service = AdminService(
         health_service=health_service,
         repository=repository,
@@ -107,6 +114,12 @@ async def startup() -> ApplicationContainer:
         upload_worker=upload_worker,
         temp_dir=settings.temp_dir,
         downloads_dir=settings.downloads_dir,
+        temp_file_service=temp_file_service,
+    )
+    admin_command_service = AdminCommandService(
+        health_service=health_service,
+        admin_service=admin_service,
+        shutdown_controller=shutdown_controller,
     )
     register_handlers(
         application=telegram_application,
@@ -114,8 +127,11 @@ async def startup() -> ApplicationContainer:
         download_queue=download_queue,
         upload_worker=upload_worker,
         folder_browser=folder_browser,
+        admin_command_service=admin_command_service,
+        admin_user_ids=settings.telegram_admin_user_ids,
         folder_recent_limit=settings.folder_recent_limit,
         logger=get_logger("app.telegram_bot"),
+        settings=settings,
     )
 
     container = ApplicationContainer(
@@ -133,6 +149,8 @@ async def startup() -> ApplicationContainer:
         startup_recovery_summary=startup_recovery_summary,
         health_service=health_service,
         admin_service=admin_service,
+        admin_command_service=admin_command_service,
+        shutdown_controller=shutdown_controller,
         telegram_application=telegram_application,
     )
     container.register_singletons()
@@ -172,8 +190,9 @@ async def shutdown(container: ApplicationContainer | None) -> None:
 
 async def run() -> None:
     container: ApplicationContainer | None = None
+    shutdown_controller = ShutdownController(logger=get_logger("app.shutdown_control"))
     try:
-        container = await startup()
+        container = await startup(shutdown_controller=shutdown_controller)
         if container.telegram_application is None:
             raise TelegramError("Telegram application was not created.")
         await start_telegram(container.telegram_application)
@@ -182,7 +201,8 @@ async def run() -> None:
         if container.upload_worker is not None:
             container.upload_worker.start()
         container.logger.info("telegram started", extra={"event": "telegram_started"})
-        await _wait_for_shutdown_signal()
+        shutdown_controller.install_signal_handlers()
+        await shutdown_controller.wait()
     finally:
         await shutdown(container)
 
@@ -216,17 +236,3 @@ async def _stop_pyrogram(client: PyrogramSessionManager | None) -> None:
         return
     if client.is_running():
         await client.stop()
-
-
-async def _wait_for_shutdown_signal() -> None:
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    for signame in ("SIGINT", "SIGTERM"):
-        signal_value = getattr(signal, signame, None)
-        if signal_value is None:
-            continue
-        with contextlib.suppress(NotImplementedError, RuntimeError):
-            loop.add_signal_handler(signal_value, stop_event.set)
-
-    await stop_event.wait()

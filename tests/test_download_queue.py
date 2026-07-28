@@ -8,7 +8,7 @@ from typing import cast
 
 from telegram import Bot
 
-from app.constants import DOWNLOAD_STATUS_CANCELLED
+from app.constants import DOWNLOAD_STATUS_CANCELLED, DOWNLOAD_STATUS_QUEUED, FILE_STATUS_QUEUED
 from app.database import DatabaseRepository, DownloadRecord, SQLiteDatabase
 from app.download_queue import DownloadJob, DownloadJobStatus, DownloadQueue, _retry_delay
 from app.exceptions import DownloadError
@@ -109,12 +109,14 @@ class CancellableDownloadManager:
         progress_callback: object | None = None,
     ) -> DownloadResult:
         self.started.set()
+        callback = cast(ProgressCallback, progress_callback)
         try:
-            await asyncio.Event().wait()
+            while True:
+                await asyncio.sleep(0.01)
+                await callback(ProgressSnapshot(current=1, total=metadata.size))
         except asyncio.CancelledError:
             self.cancelled = True
             raise
-        raise AssertionError("unreachable")
 
 
 class FirstCancellableThenSuccessDownloadManager:
@@ -132,8 +134,11 @@ class FirstCancellableThenSuccessDownloadManager:
         self.calls += 1
         if self.calls == 1:
             self.started.set()
+            callback = cast(ProgressCallback, progress_callback)
             try:
-                await asyncio.Event().wait()
+                while True:
+                    await asyncio.sleep(0.01)
+                    await callback(ProgressSnapshot(current=1, total=metadata.size))
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
@@ -379,6 +384,71 @@ def test_download_queue_recovers_interrupted_job(tmp_path: Path) -> None:
     assert bot.messages
 
 
+def test_download_queue_requeues_failed_download_for_admin_retry(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=1, username=None, first_name=None)
+    metadata = _metadata()
+    file_record = repository.create_file_record(user_id=user.id, metadata=metadata)
+    repository.save_download(
+        file_record.id,
+        total_bytes=12,
+        status_chat_id=metadata.chat_id,
+        status_message_id=99,
+    )
+    repository.mark_file_queued(file_record.id)
+    download = repository.mark_download_failed(file_record.id, "temporary network error", 3)
+    assert download is not None
+    queue = DownloadQueue(
+        repository=repository,
+        download_manager=cast(object, FakeDownloadManager()),  # type: ignore[arg-type]
+        bot=cast(Bot, FakeBot()),
+        logger=logging.getLogger("test"),
+    )
+
+    assert queue.retry_failed_download(file_record, download) is True
+
+    retried_download = repository.get_download(file_record.id)
+    retried_file = repository.get_file_record(file_record.id)
+    assert retried_download is not None
+    assert retried_file is not None
+    assert retried_download.status == DOWNLOAD_STATUS_QUEUED
+    assert retried_file.status == FILE_STATUS_QUEUED
+    assert queue.snapshot().queue_length == 1
+    database.close()
+
+
+def test_download_queue_skips_permanent_failed_download_for_admin_retry(
+    tmp_path: Path,
+) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=1, username=None, first_name=None)
+    metadata = _metadata()
+    file_record = repository.create_file_record(user_id=user.id, metadata=metadata)
+    repository.save_download(
+        file_record.id,
+        total_bytes=12,
+        status_chat_id=metadata.chat_id,
+        status_message_id=99,
+    )
+    repository.mark_file_queued(file_record.id)
+    download = repository.mark_download_failed(file_record.id, "File is too big", 3)
+    assert download is not None
+    queue = DownloadQueue(
+        repository=repository,
+        download_manager=cast(object, FakeDownloadManager()),  # type: ignore[arg-type]
+        bot=cast(Bot, FakeBot()),
+        logger=logging.getLogger("test"),
+    )
+
+    assert queue.retry_failed_download(file_record, download) is False
+    assert queue.snapshot().queue_length == 0
+    database.close()
+
+
 def test_download_queue_throttles_progress_persistence(tmp_path: Path) -> None:
     database = SQLiteDatabase(tmp_path / "app.sqlite3")
     database.initialize()
@@ -548,6 +618,34 @@ def test_download_queue_cancels_queued_job(tmp_path: Path) -> None:
     download = repository.get_download(file_record.id)
     assert download is not None
     assert download.status == DOWNLOAD_STATUS_CANCELLED
+
+
+def test_download_queue_recovery_ignores_cancelled_download(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=1, username=None, first_name=None)
+    metadata = _metadata()
+    file_record = repository.create_file_record(user_id=user.id, metadata=metadata)
+    repository.save_download(
+        file_record.id,
+        total_bytes=12,
+        status_chat_id=metadata.chat_id,
+        status_message_id=99,
+    )
+    repository.cancel_download(file_record.id)
+    queue = DownloadQueue(
+        repository=repository,
+        download_manager=cast(object, FakeDownloadManager()),  # type: ignore[arg-type]
+        bot=cast(Bot, FakeBot()),
+        logger=logging.getLogger("test"),
+    )
+
+    recovered = queue.recover_interrupted_jobs()
+
+    assert recovered == 0
+    assert queue.snapshot().queue_length == 0
+    database.close()
 
 
 def _metadata(message_id: int = 10) -> FileMetadata:

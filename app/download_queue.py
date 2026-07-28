@@ -9,7 +9,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError as TelegramApiError
 
 from app import constants
-from app.database import DatabaseRepository, FileRecord
+from app.database import DatabaseRepository, DownloadRecord, FileRecord
 from app.download_manager import DownloadManager
 from app.exceptions import DownloadError
 from app.models import DownloadResult, FileMetadata, TelegramFileType
@@ -161,21 +161,57 @@ class DownloadQueue:
             )
         return recovered
 
+    def retry_failed_download(self, file_record: FileRecord, download: DownloadRecord) -> bool:
+        if download.status != constants.DOWNLOAD_STATUS_FAILED:
+            return False
+        existing_job = self._jobs.get(file_record.id)
+        if existing_job is not None and existing_job.status in {
+            DownloadJobStatus.QUEUED,
+            DownloadJobStatus.RUNNING,
+        }:
+            return False
+        if _is_permanent_download_failure(download.error_message):
+            return False
+        metadata = _metadata_from_file_record(file_record)
+        if metadata is None:
+            return False
+        if download.status_chat_id is None or download.status_message_id is None:
+            return False
+
+        self._repository.requeue_failed_download(file_record.id)
+        job = DownloadJob(
+            file_record_id=file_record.id,
+            metadata=metadata,
+            chat_id=download.status_chat_id,
+            status_message_id=download.status_message_id,
+        )
+        self._jobs[job.file_record_id] = job
+        self._queue.put_nowait(job)
+        self._logger.info(
+            "failed download requeued by admin command",
+            extra={
+                "event": "download_retry_failed_requeued",
+                "file_record_id": file_record.id,
+            },
+        )
+        return True
+
     def cancel(self, file_record_id: int, source: str = "manual") -> bool:
         job = self._jobs.get(file_record_id)
         if job is None:
             return False
+        if job.status == DownloadJobStatus.CANCELLED:
+            return True
         job.cancel_event.set()
         job.status = DownloadJobStatus.CANCELLED
-        if job.active_task is not None and not job.active_task.done():
-            job.active_task.cancel()
+        self._repository.cancel_download(file_record_id)
         self._logger.info(
             "download cancellation requested",
             extra={
                 "event": "download_cancellation_requested",
                 "file_record_id": file_record_id,
                 "source": source,
-                "active": job.active_task is not None,
+                "active": job.active_task is not None and not job.active_task.done(),
             },
         )
         return True
@@ -600,3 +636,10 @@ def _metadata_from_file_record(file_record: FileRecord) -> FileMetadata | None:
         file_type=file_type,
         created_at=file_record.created_at,
     )
+
+
+def _is_permanent_download_failure(error_message: str | None) -> bool:
+    if error_message is None:
+        return False
+    normalized = error_message.casefold()
+    return "file is too big" in normalized or "doesn't contain any downloadable media" in normalized

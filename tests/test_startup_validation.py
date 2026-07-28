@@ -243,6 +243,7 @@ def _settings(
         log_level="INFO",
         log_file=tmp_path / "logs" / "app.log",
         telegram_bot_token="123456789:abcdefghijklmnopqrstuvwxyzABCDE",
+        telegram_admin_user_ids=(123,),
         pyrogram_api_id=pyrogram_api_id,
         pyrogram_api_hash=pyrogram_api_hash,
         pyrogram_session_name="test-session",

@@ -26,6 +26,7 @@ class Settings:
     log_level: str
     log_file: Path
     telegram_bot_token: str
+    telegram_admin_user_ids: tuple[int, ...]
     pyrogram_api_id: int | None
     pyrogram_api_hash: str | None
     pyrogram_session_name: str
@@ -59,6 +60,10 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
         log_level=log_level,
         log_file=Path(os.getenv("LOG_FILE", constants.DEFAULT_LOG_FILE)),
         telegram_bot_token=telegram_bot_token,
+        telegram_admin_user_ids=_int_tuple(
+            os.getenv("TELEGRAM_ADMIN_USER_IDS"),
+            "TELEGRAM_ADMIN_USER_IDS",
+        ),
         pyrogram_api_id=pyrogram_api_id,
         pyrogram_api_hash=_none_if_blank(os.getenv("PYROGRAM_API_HASH")),
         pyrogram_session_name=os.getenv("PYROGRAM_SESSION_NAME", "g_drive_bot"),
@@ -127,3 +132,18 @@ def _positive_int(value: str | None, name: str, default: int) -> int:
     if parsed <= 0:
         raise ConfigurationError(f"{name} must be greater than zero.")
     return parsed
+
+
+def _int_tuple(value: str | None, name: str) -> tuple[int, ...]:
+    if value is None or value.strip() == "":
+        return ()
+    parsed: list[int] = []
+    for item in value.split(","):
+        normalized = item.strip()
+        if normalized == "":
+            continue
+        try:
+            parsed.append(int(normalized))
+        except ValueError as exc:
+            raise ConfigurationError(f"{name} must contain comma-separated integers.") from exc
+    return tuple(parsed)
