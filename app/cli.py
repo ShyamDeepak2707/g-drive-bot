@@ -212,16 +212,24 @@ def _container_startup_time(now: datetime) -> datetime:
 
 
 def _pyrogram_session_exists(env: Mapping[str, str]) -> bool:
-    workdir = _path_from_env(env, "PYROGRAM_WORKDIR", constants.SESSIONS_DIR)
-    session_name = env.get("PYROGRAM_SESSION_NAME", "g_drive_bot").strip() or "g_drive_bot"
+    if _env_has_value(env, "PYROGRAM_SESSION_BASE64"):
+        workdir = Path(constants.CLOUD_PYROGRAM_WORKDIR)
+        session_name = constants.CLOUD_PYROGRAM_SESSION_NAME
+    else:
+        workdir = _path_from_env(env, "PYROGRAM_WORKDIR", constants.SESSIONS_DIR)
+        session_name = env.get("PYROGRAM_SESSION_NAME", "g_drive_bot").strip() or "g_drive_bot"
     return (workdir / f"{session_name}.session").exists()
 
 
 def _google_drive_files_exist(env: Mapping[str, str]) -> bool:
-    credentials = _path_from_env(
-        env,
-        "GOOGLE_CREDENTIALS_FILE",
-        constants.DEFAULT_GOOGLE_CREDENTIALS_FILE,
+    credentials = (
+        Path(constants.CLOUD_GOOGLE_CREDENTIALS_FILE)
+        if _env_has_value(env, "GOOGLE_CREDENTIALS_BASE64")
+        else _path_from_env(
+            env,
+            "GOOGLE_CREDENTIALS_FILE",
+            constants.DEFAULT_GOOGLE_CREDENTIALS_FILE,
+        )
     )
     token = _path_from_env(env, "GOOGLE_TOKEN_FILE", constants.DEFAULT_GOOGLE_TOKEN_FILE)
     return credentials.exists() and token.exists()
@@ -229,6 +237,10 @@ def _google_drive_files_exist(env: Mapping[str, str]) -> bool:
 
 def _path_from_env(env: Mapping[str, str], name: str, default: str) -> Path:
     return Path(env.get(name, default)).expanduser()
+
+
+def _env_has_value(env: Mapping[str, str], name: str) -> bool:
+    return env.get(name, "").strip() != ""
 
 
 if __name__ == "__main__":

@@ -7,13 +7,14 @@ from telegram.ext import Application
 
 from app.admin_commands import AdminCommandService
 from app.admin_service import AdminService
+from app.cloud_credentials import materialize_cloud_credentials
 from app.config import load_settings
 from app.database import DatabaseRepository, SQLiteDatabase
 from app.download_manager import DownloadManager
 from app.download_queue import DownloadQueue
 from app.drive.auth import get_drive_service
 from app.drive.browser import DriveFolderBrowser
-from app.exceptions import TelegramError
+from app.exceptions import StartupValidationError, TelegramError
 from app.health import HealthService
 from app.logging_config import configure_logging, get_logger
 from app.pyrogram_client import PyrogramSessionManager, create_pyrogram_client
@@ -36,6 +37,19 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
     logger.info("startup started", extra={"event": "startup_started"})
     if shutdown_controller is None:
         shutdown_controller = ShutdownController(logger=logger)
+    try:
+        materialize_cloud_credentials(settings, logger=logger)
+    except StartupValidationError as exc:
+        logger.error(
+            "startup aborted",
+            extra={
+                "event": "startup_aborted",
+                "failed_subsystem": "Configuration",
+                "reason": str(exc),
+            },
+        )
+        logger.exception("startup validation failed", extra={"event": "startup_validation_failed"})
+        raise
     cleanup_runtime_directory(settings.temp_dir, logger)
 
     database = SQLiteDatabase(settings.sqlite_db_path)

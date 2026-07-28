@@ -54,6 +54,8 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
     log_level = validate_log_level(os.getenv("LOG_LEVEL", constants.DEFAULT_LOG_LEVEL))
     pyrogram_api_id = parse_optional_int(os.getenv("PYROGRAM_API_ID"), "PYROGRAM_API_ID")
     google_scopes = parse_csv(os.getenv("GOOGLE_SCOPES"), constants.DEFAULT_GOOGLE_SCOPES)
+    google_credentials_base64_present = _env_has_value("GOOGLE_CREDENTIALS_BASE64")
+    pyrogram_session_base64_present = _env_has_value("PYROGRAM_SESSION_BASE64")
 
     settings = Settings(
         app_env=app_env,
@@ -66,15 +68,25 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
         ),
         pyrogram_api_id=pyrogram_api_id,
         pyrogram_api_hash=_none_if_blank(os.getenv("PYROGRAM_API_HASH")),
-        pyrogram_session_name=os.getenv("PYROGRAM_SESSION_NAME", "g_drive_bot"),
-        pyrogram_workdir=Path(os.getenv("PYROGRAM_WORKDIR", constants.SESSIONS_DIR)),
+        pyrogram_session_name=(
+            constants.CLOUD_PYROGRAM_SESSION_NAME
+            if pyrogram_session_base64_present
+            else os.getenv("PYROGRAM_SESSION_NAME", constants.CLOUD_PYROGRAM_SESSION_NAME)
+        ),
+        pyrogram_workdir=Path(
+            constants.CLOUD_PYROGRAM_WORKDIR
+            if pyrogram_session_base64_present
+            else os.getenv("PYROGRAM_WORKDIR", constants.SESSIONS_DIR)
+        ),
         pyrogram_max_concurrent_transmissions=_positive_int(
             os.getenv("PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS"),
             "PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS",
             constants.PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS,
         ),
         google_credentials_file=Path(
-            os.getenv("GOOGLE_CREDENTIALS_FILE", constants.DEFAULT_GOOGLE_CREDENTIALS_FILE)
+            constants.CLOUD_GOOGLE_CREDENTIALS_FILE
+            if google_credentials_base64_present
+            else os.getenv("GOOGLE_CREDENTIALS_FILE", constants.DEFAULT_GOOGLE_CREDENTIALS_FILE)
         ),
         google_token_file=Path(os.getenv("GOOGLE_TOKEN_FILE", constants.DEFAULT_GOOGLE_TOKEN_FILE)),
         google_scopes=google_scopes,
@@ -115,7 +127,9 @@ def validate_settings(settings: Settings) -> None:
             "PYROGRAM_API_ID and PYROGRAM_API_HASH must be configured together."
         )
 
-    if settings.google_auto_auth or settings.app_env == "production":
+    if (settings.google_auto_auth or settings.app_env == "production") and not _env_has_value(
+        "GOOGLE_CREDENTIALS_BASE64"
+    ):
         validate_readable_file(settings.google_credentials_file, "Google credentials file")
 
 
@@ -123,6 +137,11 @@ def _none_if_blank(value: str | None) -> str | None:
     if value is None or value.strip() == "":
         return None
     return value.strip()
+
+
+def _env_has_value(name: str) -> bool:
+    value = os.getenv(name)
+    return value is not None and value.strip() != ""
 
 
 def _positive_int(value: str | None, name: str, default: int) -> int:

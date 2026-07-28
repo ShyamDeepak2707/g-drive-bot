@@ -225,10 +225,12 @@ Then edit `.env` with your own values. Do not commit `.env`, session files, OAut
 | `PYROGRAM_SESSION_NAME` | No | `g_drive_bot` | Pyrogram session name. |
 | `PYROGRAM_WORKDIR` | No | `sessions` | Directory where the Pyrogram session is stored. |
 | `PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS` | No | `4` | Pyrogram transfer concurrency. |
+| `PYROGRAM_SESSION_BASE64` | No | Empty | Base64-encoded Pyrogram `.session` file for cloud deployments. |
 | `GOOGLE_CREDENTIALS_FILE` | Yes in production | `credentials.json` | Google OAuth client credentials file. |
 | `GOOGLE_TOKEN_FILE` | Yes after auth | `data/token.json` | Google OAuth token cache. |
 | `GOOGLE_SCOPES` | No | `https://www.googleapis.com/auth/drive.file` | Comma-separated Google OAuth scopes. |
 | `GOOGLE_AUTO_AUTH` | No | `false` | Enables interactive OAuth flow when generating a token locally. |
+| `GOOGLE_CREDENTIALS_BASE64` | No | Empty | Base64-encoded Google OAuth client credentials for cloud deployments. |
 | `SQLITE_DB_PATH` | No | `data/app.sqlite3` | SQLite database path. |
 | `DOWNLOADS_DIR` | No | `downloads` | Directory for completed local downloads pending upload/finalization. |
 | `TEMP_DIR` | No | `tmp` | Directory for temporary and partial files. |
@@ -297,6 +299,44 @@ docker compose down
 ```
 
 Compose mounts persistent runtime directories for `/data`, `/downloads`, `/temp`, and `/logs`. The image uses Python 3.12 slim, runs as a non-root user, and includes a lightweight healthcheck command.
+
+## Cloud Deployment
+
+For platforms such as Render, use a Background Worker and attach a persistent disk mounted at `/data`. The app can materialize sensitive files from Base64 environment variables during startup:
+
+- `GOOGLE_CREDENTIALS_BASE64` writes `/data/credentials.json`.
+- `PYROGRAM_SESSION_BASE64` writes `/data/sessions/g_drive_bot.session`.
+
+When these variables are absent, local file-based behavior is unchanged.
+
+Generate Base64 values on Windows PowerShell:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("credentials.json"))
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("sessions\g_drive_bot.session"))
+```
+
+Generate Base64 values on Linux or macOS:
+
+```bash
+base64 < credentials.json | tr -d '\n'
+base64 < sessions/g_drive_bot.session | tr -d '\n'
+```
+
+Configure Render environment variables:
+
+```env
+APP_ENV=production
+LOG_FILE=/data/logs/app.log
+SQLITE_DB_PATH=/data/app.sqlite3
+DOWNLOADS_DIR=/data/downloads
+TEMP_DIR=/data/temp
+GOOGLE_CREDENTIALS_BASE64=<base64 credentials.json>
+GOOGLE_TOKEN_FILE=/data/token.json
+PYROGRAM_SESSION_BASE64=<base64 g_drive_bot.session>
+```
+
+`GOOGLE_TOKEN_FILE` is still required after Google OAuth authorization. Generate it locally first, then place it on the persistent disk at `/data/token.json`. Never commit credentials, tokens, or session files.
 
 ## Telegram Admin Commands
 
@@ -420,4 +460,4 @@ pytest -q
 
 ## License
 
-No license file is currently included. Add an explicit license before public distribution.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
