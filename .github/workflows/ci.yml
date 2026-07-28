@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check
+
+      # TODO: If existing formatting drift breaks CI, do the formatting-only cleanup before v1.0.
+      - name: Black
+        run: black --check .
+
+      - name: Mypy
+        run: mypy app tests
+
+      - name: Pytest
+        run: pytest -q

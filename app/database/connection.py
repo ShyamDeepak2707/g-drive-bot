@@ -116,9 +116,7 @@ FILE_COLUMN_MIGRATIONS = {
     "message_id": "ALTER TABLE files ADD COLUMN message_id INTEGER",
     "chat_id": "ALTER TABLE files ADD COLUMN chat_id INTEGER",
     "forward_origin_chat_id": "ALTER TABLE files ADD COLUMN forward_origin_chat_id INTEGER",
-    "forward_origin_message_id": (
-        "ALTER TABLE files ADD COLUMN forward_origin_message_id INTEGER"
-    ),
+    "forward_origin_message_id": ("ALTER TABLE files ADD COLUMN forward_origin_message_id INTEGER"),
     "upload_retry_count": (
         "ALTER TABLE files ADD COLUMN upload_retry_count INTEGER NOT NULL DEFAULT 0"
     ),

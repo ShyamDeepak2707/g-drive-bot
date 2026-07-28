@@ -8,6 +8,7 @@ __pycache__/
 logs/
 tmp/
 .pytest_cache/
+.pytest_tmp*/
 .mypy_cache/
 .ruff_cache/
 credentials.json

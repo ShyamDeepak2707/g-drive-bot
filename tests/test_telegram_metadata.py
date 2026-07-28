@@ -64,9 +64,7 @@ def test_incoming_file_diagnostics_explain_hidden_sender_bot_api_fallback() -> N
     assert diagnostics["has_forward_origin"] is True
     assert diagnostics["forward_origin_type"] == "hidden_user"
     assert diagnostics["detected_download_source"] == "bot_api_file_id"
-    assert diagnostics["bot_api_fallback_reason"] == (
-        "unsupported_forward_origin_type:hidden_user"
-    )
+    assert diagnostics["bot_api_fallback_reason"] == ("unsupported_forward_origin_type:hidden_user")
 
 
 def test_incoming_file_diagnostics_identify_pyrogram_source() -> None:

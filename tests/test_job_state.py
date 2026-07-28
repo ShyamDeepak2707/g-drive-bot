@@ -51,15 +51,9 @@ def test_job_state_marks_terminal_states() -> None:
 def test_job_state_crash_recovery_keeps_retries_idempotent() -> None:
     assert recovery_state(JobState.DOWNLOADING) == JobState.QUEUED
     assert recovery_state(JobState.UPLOADING) == JobState.READY_FOR_UPLOAD
-    assert (
-        recovery_state(JobState.UPLOADING, google_drive_file_id="drive-id")
-        == JobState.UPLOADED
-    )
+    assert recovery_state(JobState.UPLOADING, google_drive_file_id="drive-id") == JobState.UPLOADED
     assert recovery_state(JobState.UPLOADED) == JobState.READY_FOR_UPLOAD
-    assert (
-        recovery_state(JobState.UPLOADED, google_drive_file_id="drive-id")
-        == JobState.UPLOADED
-    )
+    assert recovery_state(JobState.UPLOADED, google_drive_file_id="drive-id") == JobState.UPLOADED
 
 
 def test_job_state_upload_start_policy_prevents_duplicate_uploads() -> None:

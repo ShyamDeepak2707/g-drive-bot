@@ -168,6 +168,4 @@ def test_status_card_bolds_labels_and_values() -> None:
 
 
 def test_format_field_supports_icons_and_iterables() -> None:
-    assert format_field("Files", ["a.txt", "b.txt"], icon="📋") == (
-        "📋 <b>Files</b>: a.txt, b.txt"
-    )
+    assert format_field("Files", ["a.txt", "b.txt"], icon="📋") == ("📋 <b>Files</b>: a.txt, b.txt")

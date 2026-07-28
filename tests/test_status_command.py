@@ -40,8 +40,7 @@ def test_format_system_status_shows_complete_snapshot() -> None:
     assert "📊 <b>System Status</b>\n\n━━━━━━━━━━━━━━━━━━━━\n\n\n" in text
     assert "⬇️ <b>Current download</b>: <b>movie.mkv (42%, 2.0 MB/s)</b>" in text
     assert (
-        "⬆️ <b>Current upload</b>: "
-        "<b>archive.zip (Progress Unavailable, Uploading)</b>"
+        "⬆️ <b>Current upload</b>: " "<b>archive.zip (Progress Unavailable, Uploading)</b>"
     ) in text
     assert "📦 <b>Queue</b>: <b>3 jobs</b>" in text
     assert "🏁 <b>Completed jobs since startup</b>: <b>9</b>" in text

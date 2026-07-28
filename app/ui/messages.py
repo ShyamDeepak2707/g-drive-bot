@@ -214,7 +214,9 @@ def _modern_progress_card(
     total_line = _format_total_size(total_size)
     if total_line is not None:
         lines.append(f"{style.icons.storage} {_html(total_line)}")
-    lines.extend(("", f"{_progress_bar(resolved_percent, bar_segments)} <b>{resolved_percent}%</b>"))
+    lines.extend(
+        ("", f"{_progress_bar(resolved_percent, bar_segments)} <b>{resolved_percent}%</b>")
+    )
     transferred = _format_transfer(transferred_size, total_size)
     if transferred is not None:
         lines.append(f"{style.icons.storage} {_html(transferred)}")

@@ -103,9 +103,7 @@ class DownloadManager:
         try:
             if metadata.forward_origin_chat_id is not None:
                 if metadata.forward_origin_message_id is None:
-                    raise DownloadError(
-                        "Forward-origin chat id was stored without a message id."
-                    )
+                    raise DownloadError("Forward-origin chat id was stored without a message id.")
                 result = await self._download_via_forward_origin(
                     file_record_id=file_record_id,
                     metadata=metadata,

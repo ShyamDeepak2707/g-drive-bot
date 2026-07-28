@@ -275,9 +275,7 @@ def test_download_manager_logs_pyrogram_download_size_match(
         if getattr(record, "event", None) == "download_performance"
     )
     complete = next(
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "download_complete"
+        record for record in caplog.records if getattr(record, "event", None) == "download_complete"
     )
     decision = next(
         record
