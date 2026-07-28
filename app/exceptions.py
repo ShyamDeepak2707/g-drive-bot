@@ -9,6 +9,10 @@ class ConfigurationError(AppError):
     """Raised when runtime configuration is invalid."""
 
 
+class StartupValidationError(AppError):
+    """Raised when a required startup validation fails."""
+
+
 class DatabaseError(AppError):
     """Raised when SQLite operations fail."""
 

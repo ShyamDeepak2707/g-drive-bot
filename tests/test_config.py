@@ -12,12 +12,11 @@ def test_load_settings_creates_runtime_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:abcdefghijklmnopqrstuvwxyzABCDE")
-    monkeypatch.setenv("PYROGRAM_API_ID", "12345")
-    monkeypatch.setenv("PYROGRAM_API_HASH", "hash")
+    monkeypatch.delenv("PYROGRAM_API_ID", raising=False)
+    monkeypatch.delenv("PYROGRAM_API_HASH", raising=False)
     monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "data" / "app.sqlite3"))
     monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "data" / "token.json"))
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "logs" / "app.log"))
-    monkeypatch.setenv("PYROGRAM_WORKDIR", str(tmp_path / "sessions"))
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path / "downloads"))
     monkeypatch.setenv("TEMP_DIR", str(tmp_path / "tmp"))
 

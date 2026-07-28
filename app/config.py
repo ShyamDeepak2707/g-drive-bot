@@ -30,6 +30,7 @@ class Settings:
     pyrogram_api_hash: str | None
     pyrogram_session_name: str
     pyrogram_workdir: Path
+    pyrogram_max_concurrent_transmissions: int
     google_credentials_file: Path
     google_token_file: Path
     google_scopes: tuple[str, ...]
@@ -37,6 +38,9 @@ class Settings:
     sqlite_db_path: Path
     downloads_dir: Path
     temp_dir: Path
+    folder_browser_page_size: int
+    folder_browser_cache_ttl_seconds: int
+    folder_recent_limit: int
 
 
 def load_settings(dotenv_path: Path | None = None) -> Settings:
@@ -59,6 +63,11 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
         pyrogram_api_hash=_none_if_blank(os.getenv("PYROGRAM_API_HASH")),
         pyrogram_session_name=os.getenv("PYROGRAM_SESSION_NAME", "g_drive_bot"),
         pyrogram_workdir=Path(os.getenv("PYROGRAM_WORKDIR", constants.SESSIONS_DIR)),
+        pyrogram_max_concurrent_transmissions=_positive_int(
+            os.getenv("PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS"),
+            "PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS",
+            constants.PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS,
+        ),
         google_credentials_file=Path(
             os.getenv("GOOGLE_CREDENTIALS_FILE", constants.DEFAULT_GOOGLE_CREDENTIALS_FILE)
         ),
@@ -68,6 +77,21 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
         sqlite_db_path=Path(os.getenv("SQLITE_DB_PATH", constants.DEFAULT_SQLITE_DB_PATH)),
         downloads_dir=Path(os.getenv("DOWNLOADS_DIR", constants.DOWNLOADS_DIR)),
         temp_dir=Path(os.getenv("TEMP_DIR", constants.TEMP_DIR)),
+        folder_browser_page_size=_positive_int(
+            os.getenv("FOLDER_BROWSER_PAGE_SIZE"),
+            "FOLDER_BROWSER_PAGE_SIZE",
+            constants.FOLDER_BROWSER_PAGE_SIZE,
+        ),
+        folder_browser_cache_ttl_seconds=_positive_int(
+            os.getenv("FOLDER_BROWSER_CACHE_TTL_SECONDS"),
+            "FOLDER_BROWSER_CACHE_TTL_SECONDS",
+            constants.FOLDER_BROWSER_CACHE_TTL_SECONDS,
+        ),
+        folder_recent_limit=_positive_int(
+            os.getenv("FOLDER_RECENT_LIMIT"),
+            "FOLDER_RECENT_LIMIT",
+            constants.FOLDER_RECENT_LIMIT,
+        ),
     )
     validate_settings(settings)
     return settings
@@ -94,3 +118,12 @@ def _none_if_blank(value: str | None) -> str | None:
     if value is None or value.strip() == "":
         return None
     return value.strip()
+
+
+def _positive_int(value: str | None, name: str, default: int) -> int:
+    parsed = parse_optional_int(value, name)
+    if parsed is None:
+        return default
+    if parsed <= 0:
+        raise ConfigurationError(f"{name} must be greater than zero.")
+    return parsed

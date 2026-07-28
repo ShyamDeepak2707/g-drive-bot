@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -10,11 +9,12 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError as TelegramApiError
 
 from app import constants
-from app.database import DatabaseRepository
+from app.database import DatabaseRepository, FileRecord
 from app.download_manager import DownloadManager
 from app.exceptions import DownloadError
-from app.models import FileMetadata
-from app.progress import ProgressSnapshot, format_progress
+from app.models import DownloadResult, FileMetadata, TelegramFileType
+from app.progress import ProgressSnapshot, format_bytes, format_duration
+from app.ui import TelegramMessage, progress_card
 
 
 class DownloadJobStatus(StrEnum):
@@ -34,6 +34,28 @@ class DownloadJob:
     attempts: int = 0
     status: DownloadJobStatus = DownloadJobStatus.QUEUED
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    active_task: asyncio.Task[DownloadResult] | None = field(default=None, repr=False)
+
+
+@dataclass
+class _ProgressState:
+    latest: ProgressSnapshot | None = None
+
+
+@dataclass(frozen=True)
+class CurrentDownloadSnapshot:
+    file_record_id: int
+    filename: str
+    progress_percent: int | None
+    speed_bytes_per_second: float | None
+
+
+@dataclass(frozen=True)
+class DownloadQueueSnapshot:
+    current_download: CurrentDownloadSnapshot | None
+    queue_length: int
+    completed_since_startup: int
+    failed_since_startup: int
 
 
 class DownloadQueue:
@@ -45,6 +67,8 @@ class DownloadQueue:
         logger: logging.Logger,
         retry_limit: int = constants.DOWNLOAD_QUEUE_RETRY_LIMIT,
         progress_interval_seconds: float = constants.DOWNLOAD_PROGRESS_UPDATE_SECONDS,
+        retry_backoff_base_seconds: float = constants.DOWNLOAD_RETRY_BASE_DELAY_SECONDS,
+        retry_backoff_max_seconds: float = constants.DOWNLOAD_RETRY_MAX_DELAY_SECONDS,
     ) -> None:
         self._repository = repository
         self._download_manager = download_manager
@@ -52,9 +76,15 @@ class DownloadQueue:
         self._logger = logger
         self._retry_limit = retry_limit
         self._progress_interval_seconds = progress_interval_seconds
+        self._retry_backoff_base_seconds = retry_backoff_base_seconds
+        self._retry_backoff_max_seconds = retry_backoff_max_seconds
         self._queue: asyncio.Queue[DownloadJob] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._jobs: dict[int, DownloadJob] = {}
+        self._current_job: DownloadJob | None = None
+        self._current_progress: ProgressSnapshot | None = None
+        self._completed_since_startup = 0
+        self._failed_since_startup = 0
         self._stopping = False
 
     def start(self) -> None:
@@ -80,28 +110,123 @@ class DownloadQueue:
         self._repository.save_download(
             file_id=job.file_record_id,
             total_bytes=job.metadata.size,
+            status_chat_id=job.chat_id,
+            status_message_id=job.status_message_id,
         )
         await self._queue.put(job)
         self._logger.info("download job queued", extra={"event": "download_queued"})
 
-    def cancel(self, file_record_id: int) -> bool:
+    def recover_interrupted_jobs(self) -> int:
+        recovered = 0
+        for record in self._repository.list_interrupted_downloads():
+            if record.file.id in self._jobs:
+                self._logger.info(
+                    "interrupted download already recovered",
+                    extra={
+                        "event": "download_recovery_duplicate_skipped",
+                        "file_record_id": record.file.id,
+                    },
+                )
+                continue
+            metadata = _metadata_from_file_record(record.file)
+            if metadata is None:
+                self._logger.warning(
+                    "interrupted download cannot be recovered because metadata is incomplete",
+                    extra={
+                        "event": "download_recovery_skipped",
+                        "file_record_id": record.file.id,
+                    },
+                )
+                continue
+            if record.download.status_chat_id is None or record.download.status_message_id is None:
+                continue
+            self._repository.requeue_interrupted_download(record.file.id)
+            job = DownloadJob(
+                file_record_id=record.file.id,
+                metadata=metadata,
+                chat_id=record.download.status_chat_id,
+                status_message_id=record.download.status_message_id,
+                attempts=record.download.retry_count,
+            )
+            self._jobs[job.file_record_id] = job
+            self._queue.put_nowait(job)
+            recovered += 1
+            self._logger.info(
+                "interrupted download recovered",
+                extra={
+                    "event": "download_recovered",
+                    "file_record_id": job.file_record_id,
+                    "retry_count": job.attempts,
+                },
+            )
+        return recovered
+
+    def cancel(self, file_record_id: int, source: str = "manual") -> bool:
         job = self._jobs.get(file_record_id)
         if job is None:
             return False
         job.cancel_event.set()
         job.status = DownloadJobStatus.CANCELLED
+        if job.active_task is not None and not job.active_task.done():
+            job.active_task.cancel()
+        self._logger.info(
+            "download cancellation requested",
+            extra={
+                "event": "download_cancellation_requested",
+                "file_record_id": file_record_id,
+                "source": source,
+                "active": job.active_task is not None,
+            },
+        )
         return True
+
+    def cancel_chat(self, chat_id: int, source: str = "telegram_command") -> bool:
+        cancellable_jobs = [
+            job
+            for job in self._jobs.values()
+            if job.chat_id == chat_id
+            and job.status in {DownloadJobStatus.QUEUED, DownloadJobStatus.RUNNING}
+        ]
+        if not cancellable_jobs:
+            return False
+        job = cancellable_jobs[-1]
+        return self.cancel(job.file_record_id, source=source)
 
     def status(self, file_record_id: int) -> DownloadJobStatus | None:
         job = self._jobs.get(file_record_id)
         return job.status if job else None
 
+    def snapshot(self) -> DownloadQueueSnapshot:
+        current_download: CurrentDownloadSnapshot | None = None
+        if self._current_job is not None:
+            current_download = CurrentDownloadSnapshot(
+                file_record_id=self._current_job.file_record_id,
+                filename=_job_filename(self._current_job),
+                progress_percent=_progress_percent(self._current_progress),
+                speed_bytes_per_second=(
+                    self._current_progress.speed_bytes_per_second
+                    if self._current_progress is not None
+                    else None
+                ),
+            )
+        return DownloadQueueSnapshot(
+            current_download=current_download,
+            queue_length=self._queue.qsize(),
+            completed_since_startup=self._completed_since_startup,
+            failed_since_startup=self._failed_since_startup,
+        )
+
     async def _run_worker(self) -> None:
         while not self._stopping:
             job = await self._queue.get()
+            self._current_job = job
+            self._current_progress = None
             try:
                 await self._process_job(job)
             finally:
+                if self._current_job is job:
+                    self._current_job = None
+                    self._current_progress = None
                 self._queue.task_done()
 
     async def _process_job(self, job: DownloadJob) -> None:
@@ -112,43 +237,78 @@ class DownloadQueue:
                     job.file_record_id,
                     job.attempts,
                 )
+                await self._safe_edit_message(
+                    chat_id=job.chat_id,
+                    message_id=job.status_message_id,
+                    text="Download cancelled.",
+                )
                 return
 
             job.attempts += 1
             job.status = DownloadJobStatus.RUNNING
             self._repository.mark_file_downloading(job.file_record_id)
-            last_progress_update = 0.0
+            progress_state = _ProgressState()
 
-            async def progress(snapshot: ProgressSnapshot) -> None:
-                nonlocal last_progress_update
+            async def progress(
+                snapshot: ProgressSnapshot,
+                state: _ProgressState = progress_state,
+            ) -> None:
                 if job.cancel_event.is_set():
                     raise asyncio.CancelledError
-                self._repository.update_download_progress(
-                    file_id=job.file_record_id,
-                    bytes_downloaded=snapshot.current,
-                    total_bytes=snapshot.total,
-                )
-                now = time.monotonic()
-                if now - last_progress_update < self._progress_interval_seconds:
-                    return
-                last_progress_update = now
-                await self._safe_edit_message(
-                    chat_id=job.chat_id,
-                    message_id=job.status_message_id,
-                    text=format_progress(snapshot),
-                )
+                state.latest = snapshot
+                self._current_progress = snapshot
 
+            async def flush_progress(state: _ProgressState = progress_state) -> None:
+                last_flushed: ProgressSnapshot | None = None
+                interval = max(0.001, self._progress_interval_seconds)
+                while True:
+                    await asyncio.sleep(interval)
+                    snapshot = state.latest
+                    if snapshot is None or snapshot == last_flushed:
+                        continue
+                    self._repository.update_download_progress(
+                        file_id=job.file_record_id,
+                        bytes_downloaded=snapshot.current,
+                        total_bytes=snapshot.total,
+                    )
+                    await self._safe_edit_message(
+                        chat_id=job.chat_id,
+                        message_id=job.status_message_id,
+                        message=_download_progress_message(job, snapshot),
+                    )
+                    last_flushed = snapshot
+
+            progress_task: asyncio.Task[None] | None = None
             try:
+                self._logger.info(
+                    "download started",
+                    extra={
+                        "event": "download_job_started",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                    },
+                )
                 await self._safe_edit_message(
                     chat_id=job.chat_id,
                     message_id=job.status_message_id,
-                    text="Downloading\n\nQueued download started.",
+                    message=_download_started_message(job),
                 )
-                result = await self._download_manager.download(
-                    file_record_id=job.file_record_id,
-                    metadata=job.metadata,
-                    progress_callback=progress,
+                progress_task = asyncio.create_task(
+                    flush_progress(),
+                    name=f"download-progress-{job.file_record_id}",
                 )
+                job.active_task = asyncio.create_task(
+                    self._download_manager.download(
+                        file_record_id=job.file_record_id,
+                        metadata=job.metadata,
+                        progress_callback=progress,
+                    ),
+                    name=f"download-{job.file_record_id}",
+                )
+                result = await job.active_task
+                job.active_task = None
+                await _stop_progress_task(progress_task)
+                progress_task = None
                 self._repository.mark_download_complete(
                     file_id=job.file_record_id,
                     local_path=str(result.path),
@@ -156,9 +316,25 @@ class DownloadQueue:
                 )
                 self._repository.mark_file_awaiting_rename(job.file_record_id)
                 job.status = DownloadJobStatus.COMPLETED
+                self._completed_since_startup += 1
+                self._logger.info(
+                    "download completed",
+                    extra={
+                        "event": "download_job_completed",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                    },
+                )
+                await self._safe_edit_message(
+                    chat_id=job.chat_id,
+                    message_id=job.status_message_id,
+                    message=_download_complete_message(job, result),
+                )
                 await self._send_rename_prompt(job, result.filename)
                 return
             except asyncio.CancelledError:
+                job.active_task = None
+                await _stop_progress_task(progress_task)
                 if self._stopping:
                     raise
                 job.status = DownloadJobStatus.CANCELLED
@@ -171,9 +347,46 @@ class DownloadQueue:
                     message_id=job.status_message_id,
                     text="Download cancelled.",
                 )
+                self._logger.info(
+                    "download cancelled",
+                    extra={
+                        "event": "download_job_cancelled",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                    },
+                )
                 return
             except DownloadError as exc:
-                self._logger.warning("download attempt failed", extra={"event": "download_failed"})
+                job.active_task = None
+                await _stop_progress_task(progress_task)
+                if job.cancel_event.is_set():
+                    job.status = DownloadJobStatus.CANCELLED
+                    self._repository.mark_download_cancelled(
+                        job.file_record_id,
+                        job.attempts,
+                    )
+                    await self._safe_edit_message(
+                        chat_id=job.chat_id,
+                        message_id=job.status_message_id,
+                        text="Download cancelled.",
+                    )
+                    self._logger.info(
+                        "download cancelled",
+                        extra={
+                            "event": "download_job_cancelled",
+                            "file_record_id": job.file_record_id,
+                            "attempt": job.attempts,
+                        },
+                    )
+                    return
+                self._logger.warning(
+                    "download attempt failed",
+                    extra={
+                        "event": "download_failed",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                    },
+                )
                 if job.attempts > self._retry_limit:
                     job.status = DownloadJobStatus.FAILED
                     self._repository.mark_download_failed(
@@ -181,13 +394,36 @@ class DownloadQueue:
                         str(exc),
                         job.attempts,
                     )
+                    self._failed_since_startup += 1
                     await self._safe_edit_message(
                         chat_id=job.chat_id,
                         message_id=job.status_message_id,
                         text=f"Download failed: {exc}",
                     )
                     return
-                await asyncio.sleep(min(job.attempts, 5))
+                self._logger.info(
+                    "retrying download",
+                    extra={
+                        "event": "download_retry",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                        "next_attempt": job.attempts + 1,
+                        "delay_seconds": _retry_delay(
+                            job.attempts,
+                            self._retry_backoff_base_seconds,
+                            self._retry_backoff_max_seconds,
+                        ),
+                        "error": str(exc),
+                    },
+                )
+                await _sleep_or_cancel(
+                    job.cancel_event,
+                    _retry_delay(
+                        job.attempts,
+                        self._retry_backoff_base_seconds,
+                        self._retry_backoff_max_seconds,
+                    ),
+                )
 
     async def _send_rename_prompt(self, job: DownloadJob, filename: str) -> None:
         keyboard = InlineKeyboardMarkup(
@@ -218,13 +454,35 @@ class DownloadQueue:
         )
         await self._bot.send_message(
             chat_id=job.chat_id,
-            text=f"Downloaded {filename}.\nChoose how to name it before upload later.",
+            text=f"Downloaded {filename}.\nRename it, then choose a destination folder.",
             reply_markup=keyboard,
         )
 
-    async def _safe_edit_message(self, chat_id: int, message_id: int, text: str) -> None:
+    async def _safe_edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str | None = None,
+        message: TelegramMessage | None = None,
+    ) -> None:
+        if message is None and text is None:
+            raise ValueError("Either text or message must be provided.")
+        text_value = message.text if message is not None else str(text)
         try:
-            await self._bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+            if message is None:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text_value,
+                )
+            else:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text_value,
+                    parse_mode=message.parse_mode,
+                    disable_web_page_preview=message.disable_web_page_preview,
+                )
         except TelegramApiError:
             self._logger.warning(
                 "failed to edit progress message", extra={"event": "progress_edit_failed"}
@@ -233,3 +491,112 @@ class DownloadQueue:
 
 def _rename_callback(action: str, file_record_id: int) -> str:
     return f"{constants.RENAME_CALLBACK_PREFIX}:{action}:{file_record_id}"
+
+
+def _job_filename(job: DownloadJob) -> str:
+    return job.metadata.original_name or f"{job.metadata.file_type.value}-{job.metadata.message_id}"
+
+
+def _progress_percent(snapshot: ProgressSnapshot | None) -> int | None:
+    if snapshot is None or not snapshot.total:
+        return None
+    return min(100, max(0, int((snapshot.current / snapshot.total) * 100)))
+
+
+def _download_started_message(job: DownloadJob) -> TelegramMessage:
+    return progress_card(
+        "📥 Downloading",
+        filename=_job_filename(job),
+        percent=0,
+        transferred_size=format_bytes(0),
+        total_size=format_bytes(job.metadata.size),
+        speed="Calculating",
+        status_text="Queued download started.",
+    )
+
+
+def _download_progress_message(job: DownloadJob, snapshot: ProgressSnapshot) -> TelegramMessage:
+    return progress_card(
+        "📥 Downloading",
+        filename=_job_filename(job),
+        percent=_progress_percent(snapshot),
+        transferred_size=format_bytes(snapshot.current),
+        total_size=format_bytes(snapshot.total),
+        speed=_download_speed(snapshot),
+        eta=_download_eta(snapshot),
+    )
+
+
+def _download_complete_message(job: DownloadJob, result: DownloadResult) -> TelegramMessage:
+    downloaded_size = result.size if result.size is not None else job.metadata.size
+    return progress_card(
+        "📥 Downloading",
+        filename=result.filename,
+        percent=100,
+        transferred_size=format_bytes(downloaded_size),
+        total_size=format_bytes(downloaded_size),
+        status_text="✅ Done",
+    )
+
+
+def _download_speed(snapshot: ProgressSnapshot) -> str:
+    if snapshot.speed_bytes_per_second is None:
+        return "Calculating"
+    return f"{format_bytes(int(snapshot.speed_bytes_per_second))}/s"
+
+
+def _download_eta(snapshot: ProgressSnapshot) -> str | None:
+    if snapshot.eta_seconds is None:
+        return None
+    return format_duration(snapshot.eta_seconds)
+
+
+async def _stop_progress_task(task: asyncio.Task[None] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def _retry_delay(attempt: int, base_seconds: float, max_seconds: float) -> float:
+    base = max(0.0, base_seconds)
+    maximum = max(base, max_seconds)
+    return min(maximum, base * (2 ** max(0, attempt - 1)))
+
+
+async def _sleep_or_cancel(cancel_event: asyncio.Event, delay_seconds: float) -> None:
+    if delay_seconds <= 0:
+        return
+    try:
+        await asyncio.wait_for(cancel_event.wait(), timeout=delay_seconds)
+    except TimeoutError:
+        return
+
+
+def _metadata_from_file_record(file_record: FileRecord) -> FileMetadata | None:
+    if (
+        file_record.message_id is None
+        or file_record.chat_id is None
+        or file_record.file_type is None
+    ):
+        return None
+    try:
+        file_type = TelegramFileType(file_record.file_type)
+    except ValueError:
+        return None
+    return FileMetadata(
+        telegram_file_id=file_record.telegram_file_id,
+        message_id=file_record.message_id,
+        chat_id=file_record.chat_id,
+        forward_origin_chat_id=file_record.forward_origin_chat_id,
+        forward_origin_message_id=file_record.forward_origin_message_id,
+        original_name=file_record.original_name,
+        mime_type=file_record.mime_type,
+        size=file_record.size,
+        extension=file_record.extension,
+        file_type=file_type,
+        created_at=file_record.created_at,
+    )

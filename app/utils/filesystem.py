@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 
@@ -13,8 +14,30 @@ def ensure_parent_directory(path: Path) -> Path:
     return path
 
 
-def cleanup_runtime_directory(path: Path) -> None:
-    ensure_directory(path)
+def cleanup_runtime_directory(path: Path, logger: logging.Logger | None = None) -> None:
+    directory = ensure_directory(path)
+    for pattern in ("*.part", "*.part.temp"):
+        for candidate in directory.glob(pattern):
+            if not candidate.is_file():
+                continue
+            try:
+                candidate.unlink()
+            except OSError as exc:
+                if logger is not None:
+                    logger.warning(
+                        "failed to remove stale temporary file",
+                        extra={
+                            "event": "runtime_temp_cleanup_failed",
+                            "path": str(candidate),
+                            "error": str(exc),
+                        },
+                    )
+                continue
+            if logger is not None:
+                logger.info(
+                    "removed stale temporary file",
+                    extra={"event": "runtime_temp_cleanup", "path": str(candidate)},
+                )
 
 
 def unique_path(path: Path) -> Path:

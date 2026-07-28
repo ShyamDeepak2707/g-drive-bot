@@ -21,8 +21,8 @@ def test_validate_bot_token_rejects_invalid_value() -> None:
 
 
 def test_parse_optional_int() -> None:
-    assert parse_optional_int("123", "PYROGRAM_API_ID") == 123
-    assert parse_optional_int("", "PYROGRAM_API_ID") is None
+    assert parse_optional_int("123", "EXAMPLE_ID") == 123
+    assert parse_optional_int("", "EXAMPLE_ID") is None
 
 
 def test_validate_log_level_normalizes() -> None:

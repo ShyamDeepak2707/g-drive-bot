@@ -1,6 +1,6 @@
 python-telegram-bot~=22.0
 Pyrogram~=2.0
-TgCrypto~=1.2; python_version < "3.13"
+TgCrypto~=1.2
 google-api-python-client~=2.140
 google-auth-httplib2~=0.2
 google-auth-oauthlib~=1.2

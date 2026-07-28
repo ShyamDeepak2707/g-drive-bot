@@ -7,6 +7,10 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import override
 
+_RESERVED_LOG_RECORD_KEYS = frozenset(logging.makeLogRecord({}).__dict__) | frozenset(
+    {"asctime", "message"}
+)
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -19,9 +23,12 @@ class JsonFormatter(logging.Formatter):
         event = getattr(record, "event", None)
         if event is not None:
             payload["event"] = str(event)
+        for key, value in record.__dict__.items():
+            if key not in _RESERVED_LOG_RECORD_KEYS and key not in payload:
+                payload[key] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=True)
+        return json.dumps(payload, ensure_ascii=True, default=str)
 
 
 class ConsoleFormatter(logging.Formatter):

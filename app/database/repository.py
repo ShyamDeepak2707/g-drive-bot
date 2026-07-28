@@ -9,8 +9,10 @@ from app.constants import (
     DOWNLOAD_STATUS_FAILED,
     DOWNLOAD_STATUS_QUEUED,
     DOWNLOAD_STATUS_RUNNING,
+    FILE_STATUS_AWAITING_FOLDER,
     FILE_STATUS_AWAITING_RENAME,
     FILE_STATUS_CANCELLED,
+    FILE_STATUS_COMPLETED,
     FILE_STATUS_DOWNLOADED,
     FILE_STATUS_DOWNLOADING,
     FILE_STATUS_FAILED,
@@ -18,9 +20,12 @@ from app.constants import (
     FILE_STATUS_READY_FOR_UPLOAD,
     FILE_STATUS_RECEIVED,
     FILE_STATUS_SKIPPED,
+    FILE_STATUS_UPLOADED,
+    FILE_STATUS_UPLOADING,
 )
 from app.database.connection import SQLiteDatabase
-from app.models import FileMetadata
+from app.job_state import JobState, require_transition
+from app.models import FileMetadata, Folder
 
 
 @dataclass(frozen=True)
@@ -39,7 +44,17 @@ class FileRecord:
     telegram_file_id: str
     message_id: int | None
     chat_id: int | None
+    forward_origin_chat_id: int | None
+    forward_origin_message_id: int | None
     google_drive_file_id: str | None
+    upload_retry_count: int
+    upload_retry_after: str | None
+    upload_error_message: str | None
+    destination_folder_id: str | None
+    destination_folder_name: str | None
+    destination_folder_path: str | None
+    destination_drive_id: str | None
+    destination_is_shared: bool
     original_name: str | None
     mime_type: str | None
     size: int | None
@@ -56,6 +71,8 @@ class DownloadRecord:
     file_id: int
     local_path: str | None
     temp_path: str | None
+    status_chat_id: int | None
+    status_message_id: int | None
     bytes_downloaded: int
     total_bytes: int | None
     progress_percent: int
@@ -64,6 +81,12 @@ class DownloadRecord:
     retry_count: int
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class InterruptedDownloadRecord:
+    file: FileRecord
+    download: DownloadRecord
 
 
 class DatabaseRepository:
@@ -119,16 +142,19 @@ class DatabaseRepository:
         cursor = self._database.execute(
             """
             INSERT INTO files (
-                user_id, telegram_file_id, message_id, chat_id, original_name,
+                user_id, telegram_file_id, message_id, chat_id,
+                forward_origin_chat_id, forward_origin_message_id, original_name,
                 mime_type, size, extension, file_type, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
                 metadata.telegram_file_id,
                 metadata.message_id,
                 metadata.chat_id,
+                metadata.forward_origin_chat_id,
+                metadata.forward_origin_message_id,
                 metadata.original_name,
                 metadata.mime_type,
                 metadata.size,
@@ -153,6 +179,104 @@ class DatabaseRepository:
         if row is None:
             return None
         return _file_record_from_row(row)
+
+    def get_next_file_by_status(self, status: str) -> FileRecord | None:
+        row = self._database.fetch_one(
+            _FILE_SELECT_SQL + " WHERE status = ? ORDER BY updated_at ASC, id ASC LIMIT 1",
+            (status,),
+        )
+        if row is None:
+            return None
+        return _file_record_from_row(row)
+
+    def get_next_ready_for_upload(
+        self,
+        excluded_file_ids: set[int] | None = None,
+    ) -> FileRecord | None:
+        excluded_clause, excluded_parameters = _excluded_file_ids_clause(excluded_file_ids)
+        row = self._database.fetch_one(
+            _FILE_SELECT_SQL + f"""
+            WHERE status = ?
+              AND google_drive_file_id IS NULL
+              AND (upload_retry_after IS NULL OR upload_retry_after <= CURRENT_TIMESTAMP)
+              {excluded_clause}
+            ORDER BY upload_retry_after ASC, updated_at ASC, id ASC
+            LIMIT 1
+            """,
+            (FILE_STATUS_READY_FOR_UPLOAD, *excluded_parameters),
+        )
+        if row is None:
+            return None
+        return _file_record_from_row(row)
+
+    def get_next_uploaded(self, excluded_file_ids: set[int] | None = None) -> FileRecord | None:
+        excluded_clause, excluded_parameters = _excluded_file_ids_clause(excluded_file_ids)
+        row = self._database.fetch_one(
+            _FILE_SELECT_SQL + f"""
+            WHERE status = ?{excluded_clause}
+            ORDER BY updated_at ASC, id ASC
+            LIMIT 1
+            """,
+            (FILE_STATUS_UPLOADED, *excluded_parameters),
+        )
+        if row is None:
+            return None
+        return _file_record_from_row(row)
+
+    def get_next_uploading_with_drive_file_id(
+        self,
+        excluded_file_ids: set[int] | None = None,
+    ) -> FileRecord | None:
+        excluded_clause, excluded_parameters = _excluded_file_ids_clause(excluded_file_ids)
+        row = self._database.fetch_one(
+            _FILE_SELECT_SQL + f"""
+            WHERE status = ? AND google_drive_file_id IS NOT NULL{excluded_clause}
+            ORDER BY updated_at ASC, id ASC
+            LIMIT 1
+            """,
+            (FILE_STATUS_UPLOADING, *excluded_parameters),
+        )
+        if row is None:
+            return None
+        return _file_record_from_row(row)
+
+    def count_pending_uploads(self) -> int:
+        row = self._database.fetch_one(
+            """
+            SELECT COUNT(*) AS count
+            FROM files
+            WHERE status = ?
+              AND google_drive_file_id IS NULL
+              AND (upload_retry_after IS NULL OR upload_retry_after <= CURRENT_TIMESTAMP)
+            """,
+            (FILE_STATUS_READY_FOR_UPLOAD,),
+        )
+        if row is None:
+            return 0
+        return int(row["count"])
+
+    def list_failed_file_records(self, limit: int = 20) -> tuple[FileRecord, ...]:
+        row_limit = max(0, limit)
+        rows = self._database.fetch_all(
+            _FILE_SELECT_SQL + """
+            WHERE status = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (FILE_STATUS_FAILED, row_limit),
+        )
+        return tuple(_file_record_from_row(row) for row in rows)
+
+    def list_download_records_with_paths(self) -> tuple[DownloadRecord, ...]:
+        rows = self._database.fetch_all("""
+            SELECT id, file_id, local_path, temp_path, status_chat_id, status_message_id,
+                   bytes_downloaded, total_bytes, progress_percent, status, error_message,
+                   retry_count, created_at, updated_at
+            FROM downloads
+            WHERE local_path IS NOT NULL OR temp_path IS NOT NULL
+            ORDER BY updated_at DESC, id DESC
+            """)
+        return tuple(_download_record_from_row(row) for row in rows)
 
     def update_file_status(
         self,
@@ -188,6 +312,9 @@ class DatabaseRepository:
     def mark_file_awaiting_rename(self, file_id: int) -> FileRecord | None:
         return self.update_file_status(file_id, FILE_STATUS_AWAITING_RENAME)
 
+    def mark_file_awaiting_folder(self, file_id: int) -> FileRecord | None:
+        return self.update_file_status(file_id, FILE_STATUS_AWAITING_FOLDER)
+
     def mark_file_ready_for_upload(
         self,
         file_id: int,
@@ -206,6 +333,144 @@ class DatabaseRepository:
             return self.get_file_record(file_id)
         return self.update_file_status(file_id, FILE_STATUS_READY_FOR_UPLOAD)
 
+    def mark_file_uploading(self, file_id: int) -> FileRecord | None:
+        return self.update_file_status(file_id, FILE_STATUS_UPLOADING)
+
+    def mark_file_uploaded(self, file_id: int, google_drive_file_id: str) -> FileRecord | None:
+        return self.update_file_status(
+            file_id,
+            FILE_STATUS_UPLOADED,
+            google_drive_file_id=google_drive_file_id,
+        )
+
+    def mark_file_completed(self, file_id: int, google_drive_file_id: str) -> FileRecord | None:
+        return self.update_file_status(
+            file_id,
+            FILE_STATUS_COMPLETED,
+            google_drive_file_id=google_drive_file_id,
+        )
+
+    def transition_file_state(
+        self,
+        file_id: int,
+        target: JobState,
+        google_drive_file_id: str | None = None,
+    ) -> FileRecord | None:
+        file_record = self.get_file_record(file_id)
+        if file_record is None:
+            return None
+        current = JobState(file_record.status)
+        require_transition(current, target)
+        return self.update_file_status(
+            file_id,
+            target.value,
+            google_drive_file_id=google_drive_file_id,
+        )
+
+    def schedule_upload_retry(
+        self,
+        file_id: int,
+        retry_count: int,
+        retry_after: str,
+        error_message: str,
+    ) -> FileRecord | None:
+        file_record = self.get_file_record(file_id)
+        if file_record is None:
+            return None
+        require_transition(JobState(file_record.status), JobState.READY_FOR_UPLOAD)
+        self._database.execute(
+            """
+            UPDATE files
+            SET status = ?,
+                upload_retry_count = ?,
+                upload_retry_after = ?,
+                upload_error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                FILE_STATUS_READY_FOR_UPLOAD,
+                retry_count,
+                retry_after,
+                error_message,
+                file_id,
+            ),
+        )
+        self._database.commit()
+        return self.get_file_record(file_id)
+
+    def clear_upload_retry_schedule(self, file_id: int) -> FileRecord | None:
+        self._database.execute(
+            """
+            UPDATE files
+            SET upload_retry_after = NULL,
+                upload_error_message = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (file_id,),
+        )
+        self._database.commit()
+        return self.get_file_record(file_id)
+
+    def mark_upload_failed_permanently(
+        self,
+        file_id: int,
+        error_message: str,
+    ) -> FileRecord | None:
+        file_record = self.get_file_record(file_id)
+        if file_record is None:
+            return None
+        require_transition(JobState(file_record.status), JobState.FAILED)
+        self._database.execute(
+            """
+            UPDATE files
+            SET status = ?,
+                upload_error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (FILE_STATUS_FAILED, error_message, file_id),
+        )
+        self._database.commit()
+        return self.get_file_record(file_id)
+
+    def update_file_original_name(self, file_id: int, original_name: str) -> FileRecord | None:
+        self._database.execute(
+            """
+            UPDATE files
+            SET original_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (original_name, file_id),
+        )
+        self._database.commit()
+        return self.get_file_record(file_id)
+
+    def set_file_destination_folder(self, file_id: int, folder: Folder) -> FileRecord | None:
+        self._database.execute(
+            """
+            UPDATE files
+            SET destination_folder_id = ?,
+                destination_folder_name = ?,
+                destination_folder_path = ?,
+                destination_drive_id = ?,
+                destination_is_shared = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                folder.id,
+                folder.name,
+                folder.path,
+                folder.drive_id,
+                int(folder.is_shared),
+                file_id,
+            ),
+        )
+        self._database.commit()
+        return self.get_file_record(file_id)
+
     def mark_file_skipped(self, file_id: int) -> FileRecord | None:
         return self.update_file_status(file_id, FILE_STATUS_SKIPPED)
 
@@ -215,20 +480,37 @@ class DatabaseRepository:
         local_path: str | None = None,
         temp_path: str | None = None,
         total_bytes: int | None = None,
+        status_chat_id: int | None = None,
+        status_message_id: int | None = None,
     ) -> DownloadRecord:
         self._database.execute(
             """
-            INSERT INTO downloads (file_id, local_path, temp_path, total_bytes, status)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO downloads (
+                file_id, local_path, temp_path, status_chat_id, status_message_id,
+                total_bytes, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_id) DO UPDATE SET
                 local_path = excluded.local_path,
                 temp_path = excluded.temp_path,
+                status_chat_id = COALESCE(excluded.status_chat_id, downloads.status_chat_id),
+                status_message_id = COALESCE(excluded.status_message_id, downloads.status_message_id),
+                bytes_downloaded = 0,
                 total_bytes = excluded.total_bytes,
+                progress_percent = 0,
                 status = excluded.status,
                 error_message = NULL,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (file_id, local_path, temp_path, total_bytes, DOWNLOAD_STATUS_QUEUED),
+            (
+                file_id,
+                local_path,
+                temp_path,
+                status_chat_id,
+                status_message_id,
+                total_bytes,
+                DOWNLOAD_STATUS_QUEUED,
+            ),
         )
         self._database.commit()
         download = self.get_download(file_id)
@@ -239,8 +521,9 @@ class DatabaseRepository:
     def get_download(self, file_id: int) -> DownloadRecord | None:
         row = self._database.fetch_one(
             """
-            SELECT id, file_id, local_path, temp_path, bytes_downloaded, total_bytes,
-                   progress_percent, status, error_message, retry_count, created_at, updated_at
+            SELECT id, file_id, local_path, temp_path, status_chat_id, status_message_id,
+                   bytes_downloaded, total_bytes, progress_percent, status, error_message,
+                   retry_count, created_at, updated_at
             FROM downloads
             WHERE file_id = ?
             """,
@@ -249,6 +532,44 @@ class DatabaseRepository:
         if row is None:
             return None
         return _download_record_from_row(row)
+
+    def list_interrupted_downloads(self) -> list[InterruptedDownloadRecord]:
+        rows = self._database.fetch_all(
+            """
+            SELECT file_id
+            FROM downloads
+            WHERE status IN (?, ?)
+              AND status_chat_id IS NOT NULL
+              AND status_message_id IS NOT NULL
+            ORDER BY updated_at ASC, id ASC
+            """,
+            (DOWNLOAD_STATUS_QUEUED, DOWNLOAD_STATUS_RUNNING),
+        )
+        records: list[InterruptedDownloadRecord] = []
+        for row in rows:
+            file_record = self.get_file_record(int(row["file_id"]))
+            download = self.get_download(int(row["file_id"]))
+            if file_record is None or download is None:
+                continue
+            records.append(InterruptedDownloadRecord(file=file_record, download=download))
+        return records
+
+    def requeue_interrupted_download(self, file_id: int) -> DownloadRecord | None:
+        self._database.execute(
+            """
+            UPDATE downloads
+            SET bytes_downloaded = 0,
+                progress_percent = 0,
+                status = ?,
+                error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE file_id = ?
+            """,
+            (DOWNLOAD_STATUS_QUEUED, "Recovered after process restart.", file_id),
+        )
+        self._database.commit()
+        self.update_file_status(file_id, FILE_STATUS_QUEUED)
+        return self.get_download(file_id)
 
     def update_download_progress(
         self,
@@ -357,10 +678,175 @@ class DatabaseRepository:
         self.update_file_status(file_id, FILE_STATUS_CANCELLED)
         return self.get_download(file_id)
 
+    def add_favorite_folder(self, user_id: int, folder: Folder) -> Folder:
+        self._database.execute(
+            """
+            INSERT INTO folder_favorites (
+                user_id, folder_id, name, parent_id, drive_id, path,
+                is_shared, folder_created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, folder_id) DO UPDATE SET
+                name = excluded.name,
+                parent_id = excluded.parent_id,
+                drive_id = excluded.drive_id,
+                path = excluded.path,
+                is_shared = excluded.is_shared,
+                folder_created_at = excluded.folder_created_at,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            _folder_parameters(user_id, folder),
+        )
+        self._database.commit()
+        return folder
+
+    def remove_favorite_folder(self, user_id: int, folder_id: str) -> bool:
+        cursor = self._database.execute(
+            """
+            DELETE FROM folder_favorites
+            WHERE user_id = ? AND folder_id = ?
+            """,
+            (user_id, folder_id),
+        )
+        self._database.commit()
+        return cursor.rowcount > 0
+
+    def list_favorite_folders(self, user_id: int) -> list[Folder]:
+        rows = self._database.fetch_all(
+            """
+            SELECT folder_id, name, parent_id, drive_id, path, is_shared, folder_created_at
+            FROM folder_favorites
+            WHERE user_id = ?
+            ORDER BY name COLLATE NOCASE ASC
+            """,
+            (user_id,),
+        )
+        return [_folder_from_row(row) for row in rows]
+
+    def is_favorite_folder(self, user_id: int, folder_id: str) -> bool:
+        row = self._database.fetch_one(
+            """
+            SELECT 1
+            FROM folder_favorites
+            WHERE user_id = ? AND folder_id = ?
+            """,
+            (user_id, folder_id),
+        )
+        return row is not None
+
+    def record_recent_folder(self, user_id: int, folder: Folder, limit: int) -> Folder:
+        self._database.execute(
+            """
+            INSERT INTO recent_folders (
+                user_id, folder_id, name, parent_id, drive_id, path,
+                is_shared, folder_created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, folder_id) DO UPDATE SET
+                name = excluded.name,
+                parent_id = excluded.parent_id,
+                drive_id = excluded.drive_id,
+                path = excluded.path,
+                is_shared = excluded.is_shared,
+                folder_created_at = excluded.folder_created_at,
+                used_at = CURRENT_TIMESTAMP
+            """,
+            _folder_parameters(user_id, folder),
+        )
+        self._database.execute(
+            """
+            DELETE FROM recent_folders
+            WHERE user_id = ?
+              AND id NOT IN (
+                  SELECT id
+                  FROM recent_folders
+                  WHERE user_id = ?
+                  ORDER BY used_at DESC, id DESC
+                  LIMIT ?
+              )
+            """,
+            (user_id, user_id, limit),
+        )
+        self._database.commit()
+        return folder
+
+    def list_recent_folders(self, user_id: int, limit: int) -> list[Folder]:
+        rows = self._database.fetch_all(
+            """
+            SELECT folder_id, name, parent_id, drive_id, path, is_shared, folder_created_at
+            FROM recent_folders
+            WHERE user_id = ?
+            ORDER BY used_at DESC, id DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        return [_folder_from_row(row) for row in rows]
+
+    def set_last_folder(self, user_id: int, folder: Folder) -> Folder:
+        self._database.execute(
+            """
+            INSERT INTO user_folder_preferences (
+                user_id, last_folder_id, last_folder_name, last_folder_parent_id,
+                last_folder_drive_id, last_folder_path, last_folder_is_shared,
+                last_folder_created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_folder_id = excluded.last_folder_id,
+                last_folder_name = excluded.last_folder_name,
+                last_folder_parent_id = excluded.last_folder_parent_id,
+                last_folder_drive_id = excluded.last_folder_drive_id,
+                last_folder_path = excluded.last_folder_path,
+                last_folder_is_shared = excluded.last_folder_is_shared,
+                last_folder_created_at = excluded.last_folder_created_at,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                user_id,
+                folder.id,
+                folder.name,
+                folder.parent_id,
+                folder.drive_id,
+                folder.path,
+                int(folder.is_shared),
+                folder.created_at,
+            ),
+        )
+        self._database.commit()
+        return folder
+
+    def get_last_folder(self, user_id: int) -> Folder | None:
+        row = self._database.fetch_one(
+            """
+            SELECT last_folder_id, last_folder_name, last_folder_parent_id,
+                   last_folder_drive_id, last_folder_path, last_folder_is_shared,
+                   last_folder_created_at
+            FROM user_folder_preferences
+            WHERE user_id = ? AND last_folder_id IS NOT NULL
+            """,
+            (user_id,),
+        )
+        if row is None:
+            return None
+        return Folder(
+            id=row["last_folder_id"],
+            name=row["last_folder_name"],
+            parent_id=row["last_folder_parent_id"],
+            drive_id=row["last_folder_drive_id"],
+            path=row["last_folder_path"],
+            is_shared=bool(row["last_folder_is_shared"]),
+            created_at=row["last_folder_created_at"],
+        )
+
 
 _FILE_SELECT_SQL = """
-SELECT id, user_id, telegram_file_id, message_id, chat_id, google_drive_file_id,
-       original_name, mime_type, size, extension, file_type, status, created_at, updated_at
+SELECT id, user_id, telegram_file_id, message_id, chat_id,
+       forward_origin_chat_id, forward_origin_message_id, google_drive_file_id,
+       upload_retry_count, upload_retry_after, upload_error_message,
+       destination_folder_id, destination_folder_name, destination_folder_path,
+       destination_drive_id, destination_is_shared, original_name, mime_type, size,
+       extension, file_type, status, created_at, updated_at
 FROM files
 """
 
@@ -372,7 +858,17 @@ def _file_record_from_row(row: sqlite3.Row) -> FileRecord:
         telegram_file_id=row["telegram_file_id"],
         message_id=row["message_id"],
         chat_id=row["chat_id"],
+        forward_origin_chat_id=row["forward_origin_chat_id"],
+        forward_origin_message_id=row["forward_origin_message_id"],
         google_drive_file_id=row["google_drive_file_id"],
+        upload_retry_count=int(row["upload_retry_count"]),
+        upload_retry_after=row["upload_retry_after"],
+        upload_error_message=row["upload_error_message"],
+        destination_folder_id=row["destination_folder_id"],
+        destination_folder_name=row["destination_folder_name"],
+        destination_folder_path=row["destination_folder_path"],
+        destination_drive_id=row["destination_drive_id"],
+        destination_is_shared=bool(row["destination_is_shared"]),
         original_name=row["original_name"],
         mime_type=row["mime_type"],
         size=row["size"],
@@ -390,6 +886,8 @@ def _download_record_from_row(row: sqlite3.Row) -> DownloadRecord:
         file_id=int(row["file_id"]),
         local_path=row["local_path"],
         temp_path=row["temp_path"],
+        status_chat_id=row["status_chat_id"],
+        status_message_id=row["status_message_id"],
         bytes_downloaded=int(row["bytes_downloaded"]),
         total_bytes=row["total_bytes"],
         progress_percent=int(row["progress_percent"]),
@@ -399,3 +897,36 @@ def _download_record_from_row(row: sqlite3.Row) -> DownloadRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _folder_parameters(user_id: int, folder: Folder) -> tuple[object, ...]:
+    return (
+        user_id,
+        folder.id,
+        folder.name,
+        folder.parent_id,
+        folder.drive_id,
+        folder.path,
+        int(folder.is_shared),
+        folder.created_at,
+    )
+
+
+def _folder_from_row(row: sqlite3.Row) -> Folder:
+    return Folder(
+        id=row["folder_id"],
+        name=row["name"],
+        parent_id=row["parent_id"],
+        drive_id=row["drive_id"],
+        path=row["path"],
+        is_shared=bool(row["is_shared"]),
+        created_at=row["folder_created_at"],
+    )
+
+
+def _excluded_file_ids_clause(excluded_file_ids: set[int] | None) -> tuple[str, tuple[int, ...]]:
+    if not excluded_file_ids:
+        return "", ()
+    ordered_ids = tuple(sorted(excluded_file_ids))
+    placeholders = ", ".join("?" for _ in ordered_ids)
+    return f" AND id NOT IN ({placeholders})", ordered_ids

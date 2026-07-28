@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from googleapiclient.discovery import Resource
 from telegram.ext import Application
 
+from app.admin_service import AdminService
 from app.config import Settings
 from app.database import DatabaseRepository, SQLiteDatabase
 from app.download_manager import DownloadManager
 from app.download_queue import DownloadQueue
-from app.pyrogram_client import PyrogramSessionManager
+from app.drive.browser import DriveFolderBrowser
+from app.health import HealthService
+from app.startup_recovery import StartupRecoverySummary
 from app.task_manager import AsyncTaskManager
+from app.upload_worker import UploadWorker
+
+if TYPE_CHECKING:
+    from app.pyrogram_client import PyrogramSessionManager
 
 T = TypeVar("T")
 
@@ -41,7 +48,12 @@ class ApplicationContainer:
     pyrogram_client: PyrogramSessionManager | None = None
     download_manager: DownloadManager | None = None
     download_queue: DownloadQueue | None = None
+    upload_worker: UploadWorker | None = None
     drive_service: Resource | None = None
+    folder_browser: DriveFolderBrowser | None = None
+    startup_recovery_summary: StartupRecoverySummary | None = None
+    health_service: HealthService | None = None
+    admin_service: AdminService | None = None
     telegram_application: Application | None = None
     registry: ServiceRegistry = field(default_factory=ServiceRegistry)
 
@@ -57,7 +69,17 @@ class ApplicationContainer:
             self.registry.set("download_manager", self.download_manager)
         if self.download_queue is not None:
             self.registry.set("download_queue", self.download_queue)
+        if self.upload_worker is not None:
+            self.registry.set("upload_worker", self.upload_worker)
         if self.drive_service is not None:
             self.registry.set("drive_service", self.drive_service)
+        if self.folder_browser is not None:
+            self.registry.set("folder_browser", self.folder_browser)
+        if self.startup_recovery_summary is not None:
+            self.registry.set("startup_recovery_summary", self.startup_recovery_summary)
+        if self.health_service is not None:
+            self.registry.set("health_service", self.health_service)
+        if self.admin_service is not None:
+            self.registry.set("admin_service", self.admin_service)
         if self.telegram_application is not None:
             self.registry.set("telegram_application", self.telegram_application)

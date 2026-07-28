@@ -1,11 +1,25 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     env_file:
       - .env
-    volumes:
-      - ./data:/app/data
-      - ./sessions:/app/sessions
-      - ./downloads:/app/downloads
-      - ./credentials.json:/app/credentials.json:ro
     restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+      - ./temp:/temp
+      - ./logs:/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Optional override for the Dockerfile healthcheck.
+    # healthcheck:
+    #   test: ["CMD", "python", "-m", "app.cli", "health"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 3
+    #   start_period: 30s

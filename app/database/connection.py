@@ -27,7 +27,17 @@ CREATE TABLE IF NOT EXISTS files (
     telegram_file_id TEXT NOT NULL,
     message_id INTEGER,
     chat_id INTEGER,
+    forward_origin_chat_id INTEGER,
+    forward_origin_message_id INTEGER,
     google_drive_file_id TEXT,
+    upload_retry_count INTEGER NOT NULL DEFAULT 0,
+    upload_retry_after TEXT,
+    upload_error_message TEXT,
+    destination_folder_id TEXT,
+    destination_folder_name TEXT,
+    destination_folder_path TEXT,
+    destination_drive_id TEXT,
+    destination_is_shared INTEGER NOT NULL DEFAULT 0,
     original_name TEXT,
     mime_type TEXT,
     size INTEGER,
@@ -44,6 +54,8 @@ CREATE TABLE IF NOT EXISTS downloads (
     file_id INTEGER NOT NULL UNIQUE,
     local_path TEXT,
     temp_path TEXT,
+    status_chat_id INTEGER,
+    status_message_id INTEGER,
     bytes_downloaded INTEGER NOT NULL DEFAULT 0,
     total_bytes INTEGER,
     progress_percent INTEGER NOT NULL DEFAULT 0,
@@ -54,14 +66,79 @@ CREATE TABLE IF NOT EXISTS downloads (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (file_id) REFERENCES files(id)
 );
+
+CREATE TABLE IF NOT EXISTS folder_favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    folder_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent_id TEXT,
+    drive_id TEXT,
+    path TEXT NOT NULL,
+    is_shared INTEGER NOT NULL DEFAULT 0,
+    folder_created_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, folder_id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS recent_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    folder_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent_id TEXT,
+    drive_id TEXT,
+    path TEXT NOT NULL,
+    is_shared INTEGER NOT NULL DEFAULT 0,
+    folder_created_at TEXT,
+    used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, folder_id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_folder_preferences (
+    user_id INTEGER PRIMARY KEY,
+    last_folder_id TEXT,
+    last_folder_name TEXT,
+    last_folder_parent_id TEXT,
+    last_folder_drive_id TEXT,
+    last_folder_path TEXT,
+    last_folder_is_shared INTEGER NOT NULL DEFAULT 0,
+    last_folder_created_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
 """
 
 FILE_COLUMN_MIGRATIONS = {
     "message_id": "ALTER TABLE files ADD COLUMN message_id INTEGER",
     "chat_id": "ALTER TABLE files ADD COLUMN chat_id INTEGER",
+    "forward_origin_chat_id": "ALTER TABLE files ADD COLUMN forward_origin_chat_id INTEGER",
+    "forward_origin_message_id": (
+        "ALTER TABLE files ADD COLUMN forward_origin_message_id INTEGER"
+    ),
+    "upload_retry_count": (
+        "ALTER TABLE files ADD COLUMN upload_retry_count INTEGER NOT NULL DEFAULT 0"
+    ),
+    "upload_retry_after": "ALTER TABLE files ADD COLUMN upload_retry_after TEXT",
+    "upload_error_message": "ALTER TABLE files ADD COLUMN upload_error_message TEXT",
+    "destination_folder_id": "ALTER TABLE files ADD COLUMN destination_folder_id TEXT",
+    "destination_folder_name": "ALTER TABLE files ADD COLUMN destination_folder_name TEXT",
+    "destination_folder_path": "ALTER TABLE files ADD COLUMN destination_folder_path TEXT",
+    "destination_drive_id": "ALTER TABLE files ADD COLUMN destination_drive_id TEXT",
+    "destination_is_shared": (
+        "ALTER TABLE files ADD COLUMN destination_is_shared INTEGER NOT NULL DEFAULT 0"
+    ),
     "size": "ALTER TABLE files ADD COLUMN size INTEGER",
     "extension": "ALTER TABLE files ADD COLUMN extension TEXT",
     "file_type": "ALTER TABLE files ADD COLUMN file_type TEXT",
+}
+
+DOWNLOAD_COLUMN_MIGRATIONS = {
+    "status_chat_id": "ALTER TABLE downloads ADD COLUMN status_chat_id INTEGER",
+    "status_message_id": "ALTER TABLE downloads ADD COLUMN status_message_id INTEGER",
 }
 
 
@@ -159,4 +236,10 @@ class SQLiteDatabase:
         existing_columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(files)")}
         for column, migration_sql in FILE_COLUMN_MIGRATIONS.items():
             if column not in existing_columns:
+                self.execute(migration_sql)
+        existing_download_columns = {
+            str(row["name"]) for row in self.fetch_all("PRAGMA table_info(downloads)")
+        }
+        for column, migration_sql in DOWNLOAD_COLUMN_MIGRATIONS.items():
+            if column not in existing_download_columns:
                 self.execute(migration_sql)
