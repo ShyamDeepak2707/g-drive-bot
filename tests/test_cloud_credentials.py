@@ -15,14 +15,17 @@ def test_materialize_cloud_credentials_writes_valid_base64(tmp_path: Path) -> No
     settings = _settings(tmp_path)
     env = {
         "GOOGLE_CREDENTIALS_BASE64": _encode(b'{"installed": {}}'),
+        "GOOGLE_TOKEN_BASE64": _encode(b'{"refresh_token": "token"}'),
         "PYROGRAM_SESSION_BASE64": _encode(b"session-bytes"),
     }
 
     summary = materialize_cloud_credentials(settings, env=env)
 
     assert summary.google_credentials_written is True
+    assert summary.google_token_written is True
     assert summary.pyrogram_session_written is True
     assert settings.google_credentials_file.read_bytes() == b'{"installed": {}}'
+    assert settings.google_token_file.read_bytes() == b'{"refresh_token": "token"}'
     assert (
         settings.pyrogram_workdir / f"{settings.pyrogram_session_name}.session"
     ).read_bytes() == b"session-bytes"
@@ -35,6 +38,15 @@ def test_materialize_cloud_credentials_rejects_invalid_base64(tmp_path: Path) ->
         materialize_cloud_credentials(settings, env={"GOOGLE_CREDENTIALS_BASE64": "not base64"})
 
     assert not settings.google_credentials_file.exists()
+
+
+def test_materialize_cloud_credentials_rejects_invalid_token_base64(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    with pytest.raises(StartupValidationError, match="GOOGLE_TOKEN_BASE64"):
+        materialize_cloud_credentials(settings, env={"GOOGLE_TOKEN_BASE64": "not base64"})
+
+    assert not settings.google_token_file.exists()
 
 
 def test_materialize_cloud_credentials_reports_write_failures(
@@ -63,6 +75,7 @@ def test_materialize_cloud_credentials_falls_back_to_local_files_when_env_absent
     summary = materialize_cloud_credentials(settings, env={})
 
     assert summary.google_credentials_written is False
+    assert summary.google_token_written is False
     assert summary.pyrogram_session_written is False
     assert not settings.google_credentials_file.exists()
     assert not (settings.pyrogram_workdir / f"{settings.pyrogram_session_name}.session").exists()
@@ -74,11 +87,13 @@ def test_load_settings_uses_cloud_paths_when_base64_env_is_present(
     _set_minimum_env(monkeypatch, tmp_path)
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("GOOGLE_CREDENTIALS_BASE64", _encode(b"credentials"))
+    monkeypatch.setenv("GOOGLE_TOKEN_BASE64", _encode(b"token"))
     monkeypatch.setenv("PYROGRAM_SESSION_BASE64", _encode(b"session"))
 
     settings = load_settings(dotenv_path=tmp_path / ".env.missing")
 
     assert settings.google_credentials_file == Path(constants.CLOUD_GOOGLE_CREDENTIALS_FILE)
+    assert settings.google_token_file == Path(constants.CLOUD_GOOGLE_TOKEN_FILE)
     assert settings.pyrogram_workdir == Path(constants.CLOUD_PYROGRAM_WORKDIR)
     assert settings.pyrogram_session_name == constants.CLOUD_PYROGRAM_SESSION_NAME
 
@@ -91,14 +106,17 @@ def test_load_settings_keeps_existing_local_file_behavior_when_base64_env_absent
     _set_minimum_env(monkeypatch, tmp_path)
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("GOOGLE_CREDENTIALS_FILE", str(credentials))
+    monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "tokens" / "token.json"))
     monkeypatch.setenv("PYROGRAM_SESSION_NAME", "local-session")
     monkeypatch.setenv("PYROGRAM_WORKDIR", str(tmp_path / "local-sessions"))
     monkeypatch.delenv("GOOGLE_CREDENTIALS_BASE64", raising=False)
+    monkeypatch.delenv("GOOGLE_TOKEN_BASE64", raising=False)
     monkeypatch.delenv("PYROGRAM_SESSION_BASE64", raising=False)
 
     settings = load_settings(dotenv_path=tmp_path / ".env.missing")
 
     assert settings.google_credentials_file == credentials
+    assert settings.google_token_file == tmp_path / "tokens" / "token.json"
     assert settings.pyrogram_workdir == tmp_path / "local-sessions"
     assert settings.pyrogram_session_name == "local-session"
 

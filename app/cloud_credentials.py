@@ -12,12 +12,14 @@ from app.config import Settings
 from app.exceptions import StartupValidationError
 
 GOOGLE_CREDENTIALS_BASE64_ENV = "GOOGLE_CREDENTIALS_BASE64"
+GOOGLE_TOKEN_BASE64_ENV = "GOOGLE_TOKEN_BASE64"
 PYROGRAM_SESSION_BASE64_ENV = "PYROGRAM_SESSION_BASE64"
 
 
 @dataclass(frozen=True)
 class CloudCredentialMaterializationSummary:
     google_credentials_written: bool
+    google_token_written: bool
     pyrogram_session_written: bool
 
 
@@ -35,6 +37,13 @@ def materialize_cloud_credentials(
         label="Google credentials file",
         logger=logger,
     )
+    google_token_written = _materialize_if_present(
+        env=values,
+        env_name=GOOGLE_TOKEN_BASE64_ENV,
+        destination=settings.google_token_file,
+        label="Google token file",
+        logger=logger,
+    )
     pyrogram_session_written = _materialize_if_present(
         env=values,
         env_name=PYROGRAM_SESSION_BASE64_ENV,
@@ -44,6 +53,7 @@ def materialize_cloud_credentials(
     )
     return CloudCredentialMaterializationSummary(
         google_credentials_written=google_credentials_written,
+        google_token_written=google_token_written,
         pyrogram_session_written=pyrogram_session_written,
     )
 

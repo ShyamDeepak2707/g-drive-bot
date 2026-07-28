@@ -55,6 +55,7 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
     pyrogram_api_id = parse_optional_int(os.getenv("PYROGRAM_API_ID"), "PYROGRAM_API_ID")
     google_scopes = parse_csv(os.getenv("GOOGLE_SCOPES"), constants.DEFAULT_GOOGLE_SCOPES)
     google_credentials_base64_present = _env_has_value("GOOGLE_CREDENTIALS_BASE64")
+    google_token_base64_present = _env_has_value("GOOGLE_TOKEN_BASE64")
     pyrogram_session_base64_present = _env_has_value("PYROGRAM_SESSION_BASE64")
 
     settings = Settings(
@@ -88,7 +89,11 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
             if google_credentials_base64_present
             else os.getenv("GOOGLE_CREDENTIALS_FILE", constants.DEFAULT_GOOGLE_CREDENTIALS_FILE)
         ),
-        google_token_file=Path(os.getenv("GOOGLE_TOKEN_FILE", constants.DEFAULT_GOOGLE_TOKEN_FILE)),
+        google_token_file=Path(
+            constants.CLOUD_GOOGLE_TOKEN_FILE
+            if google_token_base64_present
+            else os.getenv("GOOGLE_TOKEN_FILE", constants.DEFAULT_GOOGLE_TOKEN_FILE)
+        ),
         google_scopes=google_scopes,
         google_auto_auth=parse_bool(os.getenv("GOOGLE_AUTO_AUTH"), default=False),
         sqlite_db_path=Path(os.getenv("SQLITE_DB_PATH", constants.DEFAULT_SQLITE_DB_PATH)),

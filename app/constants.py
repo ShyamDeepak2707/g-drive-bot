@@ -13,6 +13,7 @@ DEFAULT_GOOGLE_CREDENTIALS_FILE = "credentials.json"
 DEFAULT_GOOGLE_TOKEN_FILE = f"{DATA_DIR}/token.json"
 DEFAULT_GOOGLE_SCOPES = ("https://www.googleapis.com/auth/drive.file",)
 CLOUD_GOOGLE_CREDENTIALS_FILE = "/data/credentials.json"
+CLOUD_GOOGLE_TOKEN_FILE = "/data/token.json"
 CLOUD_PYROGRAM_SESSION_NAME = "g_drive_bot"
 CLOUD_PYROGRAM_WORKDIR = "/data/sessions"
 DEFAULT_LOG_LEVEL = "INFO"

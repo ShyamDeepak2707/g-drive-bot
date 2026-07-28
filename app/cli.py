@@ -231,7 +231,11 @@ def _google_drive_files_exist(env: Mapping[str, str]) -> bool:
             constants.DEFAULT_GOOGLE_CREDENTIALS_FILE,
         )
     )
-    token = _path_from_env(env, "GOOGLE_TOKEN_FILE", constants.DEFAULT_GOOGLE_TOKEN_FILE)
+    token = (
+        Path(constants.CLOUD_GOOGLE_TOKEN_FILE)
+        if _env_has_value(env, "GOOGLE_TOKEN_BASE64")
+        else _path_from_env(env, "GOOGLE_TOKEN_FILE", constants.DEFAULT_GOOGLE_TOKEN_FILE)
+    )
     return credentials.exists() and token.exists()
 
 

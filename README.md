@@ -231,6 +231,7 @@ Then edit `.env` with your own values. Do not commit `.env`, session files, OAut
 | `GOOGLE_SCOPES` | No | `https://www.googleapis.com/auth/drive.file` | Comma-separated Google OAuth scopes. |
 | `GOOGLE_AUTO_AUTH` | No | `false` | Enables interactive OAuth flow when generating a token locally. |
 | `GOOGLE_CREDENTIALS_BASE64` | No | Empty | Base64-encoded Google OAuth client credentials for cloud deployments. |
+| `GOOGLE_TOKEN_BASE64` | No | Empty | Base64-encoded Google OAuth token file for cloud deployments. |
 | `SQLITE_DB_PATH` | No | `data/app.sqlite3` | SQLite database path. |
 | `DOWNLOADS_DIR` | No | `downloads` | Directory for completed local downloads pending upload/finalization. |
 | `TEMP_DIR` | No | `tmp` | Directory for temporary and partial files. |
@@ -305,6 +306,7 @@ Compose mounts persistent runtime directories for `/data`, `/downloads`, `/temp`
 For platforms such as Render, use a Background Worker and attach a persistent disk mounted at `/data`. The app can materialize sensitive files from Base64 environment variables during startup:
 
 - `GOOGLE_CREDENTIALS_BASE64` writes `/data/credentials.json`.
+- `GOOGLE_TOKEN_BASE64` writes `/data/token.json`.
 - `PYROGRAM_SESSION_BASE64` writes `/data/sessions/g_drive_bot.session`.
 
 When these variables are absent, local file-based behavior is unchanged.
@@ -313,6 +315,7 @@ Generate Base64 values on Windows PowerShell:
 
 ```powershell
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("credentials.json"))
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("data\token.json"))
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("sessions\g_drive_bot.session"))
 ```
 
@@ -320,6 +323,7 @@ Generate Base64 values on Linux or macOS:
 
 ```bash
 base64 < credentials.json | tr -d '\n'
+base64 < data/token.json | tr -d '\n'
 base64 < sessions/g_drive_bot.session | tr -d '\n'
 ```
 
@@ -332,11 +336,11 @@ SQLITE_DB_PATH=/data/app.sqlite3
 DOWNLOADS_DIR=/data/downloads
 TEMP_DIR=/data/temp
 GOOGLE_CREDENTIALS_BASE64=<base64 credentials.json>
-GOOGLE_TOKEN_FILE=/data/token.json
+GOOGLE_TOKEN_BASE64=<base64 data/token.json>
 PYROGRAM_SESSION_BASE64=<base64 g_drive_bot.session>
 ```
 
-`GOOGLE_TOKEN_FILE` is still required after Google OAuth authorization. Generate it locally first, then place it on the persistent disk at `/data/token.json`. Never commit credentials, tokens, or session files.
+Generate `data/token.json` locally first by authorizing with `GOOGLE_AUTO_AUTH=true`, then set `GOOGLE_AUTO_AUTH=false` in Render. Never commit credentials, tokens, or session files.
 
 ## Telegram Admin Commands
 
