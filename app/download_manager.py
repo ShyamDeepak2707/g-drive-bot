@@ -19,7 +19,7 @@ from app.progress import ProgressSnapshot
 from app.utils.filesystem import ensure_directory, unique_path
 
 ProgressCallback = Callable[[ProgressSnapshot], Awaitable[None]]
-BOT_DIALOG_SEARCH_LIMIT = 100
+BOT_DIALOG_SEARCH_LIMIT = 1000
 
 
 class BotApiFile(Protocol):
@@ -446,11 +446,43 @@ class DownloadManager:
                 },
             )
         if getattr(message, metadata.file_type.value, None) is None:
-            raise DownloadError(
-                "Bot-dialog Telegram message does not contain the expected "
-                f"{metadata.file_type.value} media."
+            self._logger.warning(
+                "direct bot-dialog message is not expected media; searching bot-dialog history",
+                extra={
+                    "event": "bot_dialog_direct_message_without_expected_media",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "requested_message_id": metadata.message_id,
+                    "resolved_message_id": getattr(message, "id", None),
+                    "expected_file_type": metadata.file_type.value,
+                    "detected_media_type": detected_media_type,
+                    "text": getattr(message, "text", None),
+                    "caption": getattr(message, "caption", None),
+                },
             )
-        if not _message_matches_metadata(message, metadata):
+            message = await self._find_bot_dialog_media_message(
+                client=client,
+                bot_peer=bot_peer,
+                metadata=metadata,
+                file_record_id=file_record_id,
+            )
+            detected_media_type = _detect_media_type(message)
+            self._logger.info(
+                "bot-dialog matching media message resolved",
+                extra={
+                    "event": "bot_dialog_matching_message_resolved",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "resolved_message_id": getattr(message, "id", None),
+                    "resolved_chat_id": getattr(getattr(message, "chat", None), "id", None),
+                    "detected_media_type": detected_media_type,
+                    "file_name": _message_media_file_name(message, metadata),
+                    "file_size": _message_media_size(message, metadata),
+                    "resolved_file_unique_id_present": _message_media_unique_id(message, metadata)
+                    is not None,
+                },
+            )
+        elif not _message_matches_metadata(message, metadata):
             self._logger.warning(
                 "bot-dialog direct message did not match stored media metadata",
                 extra={

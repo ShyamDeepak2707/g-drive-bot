@@ -423,6 +423,60 @@ def test_download_manager_searches_bot_dialog_when_direct_message_unique_id_diff
     assert result.path.read_bytes() == b"hello"
 
 
+def test_download_manager_searches_bot_dialog_when_direct_message_has_no_media(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    matching_message = FakePyrogramMessage(
+        message_id=779,
+        chat_id=1846101730,
+        document_size=5,
+        document_unique_id="expected-unique-id",
+    )
+    client = FakePyrogramClient(
+        has_media=False,
+        resolved_chat_id=1846101730,
+        search_messages=[matching_message],
+    )
+    bot = FakeBotApiClient()
+    session = FakePyrogramSession(client)
+    manager = DownloadManager(
+        bot=bot,
+        pyrogram_session=session,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="test"):
+        result = asyncio.run(
+            manager.download(
+                file_record_id=1,
+                metadata=_metadata(
+                    message_id=214,
+                    telegram_file_unique_id="expected-unique-id",
+                ),
+            )
+        )
+
+    non_media = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "bot_dialog_direct_message_without_expected_media"
+    )
+    resolved = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "bot_dialog_matching_message_resolved"
+    )
+    assert non_media.__dict__["expected_file_type"] == "document"
+    assert resolved.__dict__["resolved_message_id"] == 779
+    assert client.search_messages_calls == 1
+    assert client.downloaded_message is matching_message
+    assert bot.requested_file_id is None
+    assert result.path.read_bytes() == b"hello"
+
+
 def test_download_manager_falls_back_to_bot_api_when_bot_dialog_has_no_media(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -445,7 +499,7 @@ def test_download_manager_falls_back_to_bot_api_when_bot_dialog_has_no_media(
         for record in caplog.records
         if getattr(record, "event", None) == "pyrogram_bot_dialog_fallback"
     )
-    assert "does not contain the expected document media" in fallback.__dict__["error"]
+    assert "could not locate the matching media" in fallback.__dict__["error"]
     assert bot.requested_file_id == "bot-api-file-id"
     assert result.path.read_bytes() == b"hello"
 
