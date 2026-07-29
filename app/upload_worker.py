@@ -492,14 +492,10 @@ class UploadWorker:
         )
         try:
             upload_input = self._resolve_upload_input(updated)
-            upload_target = self._upload_status_target(updated.id)
+            upload_target = await self._send_upload_started_message(updated, upload_input)
             progress_state = _UploadProgressState()
             progress_task: asyncio.Task[None] | None = None
             if upload_target is not None:
-                await self._safe_edit_message(
-                    upload_target,
-                    _upload_started_message(updated, upload_input),
-                )
                 progress_task = asyncio.create_task(
                     self._flush_upload_progress(upload_target, updated, progress_state),
                     name=f"upload-progress-{updated.id}",
@@ -554,7 +550,12 @@ class UploadWorker:
             if upload_target is not None:
                 await self._safe_edit_message(
                     upload_target,
-                    _upload_complete_message(updated, upload_input, finalized=finalized),
+                    _upload_complete_message(
+                        updated,
+                        upload_input,
+                        uploaded_file=uploaded_file,
+                        finalized=finalized,
+                    ),
                 )
 
     def _recover_uploaded_after_restart(self, file_record: FileRecord) -> bool:
@@ -861,25 +862,58 @@ class UploadWorker:
             },
         )
 
-    def _upload_status_target(self, file_record_id: int) -> _UploadStatusTarget | None:
-        download = self._repository.get_download(file_record_id)
-        if (
-            download is None
-            or download.status_chat_id is None
-            or download.status_message_id is None
-        ):
+    async def _send_upload_started_message(
+        self,
+        file_record: FileRecord,
+        upload_input: _UploadInput,
+    ) -> _UploadStatusTarget | None:
+        if self._notification_bot is None:
+            return None
+        download = self._repository.get_download(file_record.id)
+        if download is None or download.status_chat_id is None:
             self._logger.info(
-                "upload progress message skipped because no Telegram status message is stored",
+                "upload progress message skipped because no Telegram chat is stored",
                 extra={
                     "event": "upload_progress_message_skipped",
-                    "file_record_id": file_record_id,
+                    "file_record_id": file_record.id,
                     "download_record_present": download is not None,
+                },
+            )
+            return None
+        message = _upload_started_message(file_record, upload_input)
+        try:
+            sent_message = await self._notification_bot.send_message(
+                chat_id=download.status_chat_id,
+                text=message.text,
+                parse_mode=message.parse_mode,
+                disable_web_page_preview=message.disable_web_page_preview,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "failed to send upload progress message",
+                extra={
+                    "event": "upload_progress_send_failed",
+                    "file_record_id": file_record.id,
+                    "status_chat_id": download.status_chat_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return None
+        message_id = getattr(sent_message, "message_id", None)
+        if not isinstance(message_id, int):
+            self._logger.warning(
+                "upload progress message cannot be edited because Telegram did not return a message id",
+                extra={
+                    "event": "upload_progress_message_id_missing",
+                    "file_record_id": file_record.id,
+                    "status_chat_id": download.status_chat_id,
                 },
             )
             return None
         return _UploadStatusTarget(
             chat_id=download.status_chat_id,
-            message_id=download.status_message_id,
+            message_id=message_id,
         )
 
     def _record_upload_progress(
@@ -1064,17 +1098,24 @@ def _upload_complete_message(
     file_record: FileRecord,
     upload_input: _UploadInput,
     *,
+    uploaded_file: UploadedFile,
     finalized: bool,
 ) -> TelegramMessage:
     total_size = upload_input.expected_size or _safe_file_size(upload_input.local_path)
-    status_text = "✅ Done" if finalized else "✅ Uploaded; cleanup pending"
+    status_lines = [
+        "✅ Done" if finalized else "✅ Uploaded; cleanup pending",
+        f"📂 Destination: {file_record.destination_folder_path or file_record.destination_folder_id or 'Unknown'}",
+        f"🆔 Drive file ID: {uploaded_file.drive_file_id}",
+    ]
+    if uploaded_file.size is not None:
+        status_lines.append(f"☁️ Verified size: {format_bytes(uploaded_file.size)}")
     return progress_card(
         "⬆️ Uploading",
         filename=_file_record_filename(file_record),
         percent=100,
         transferred_size=format_bytes(total_size),
         total_size=format_bytes(total_size),
-        status_text=status_text,
+        status_text="\n".join(status_lines),
     )
 
 

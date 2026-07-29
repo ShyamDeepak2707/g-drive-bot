@@ -100,6 +100,7 @@ class FakeNotificationBot:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.messages: list[dict[str, object]] = []
+        self.next_message_id = 1000
 
     async def send_message(
         self,
@@ -110,15 +111,18 @@ class FakeNotificationBot:
     ) -> object:
         if self.fail:
             raise RuntimeError("Telegram send failed")
+        message_id = self.next_message_id
+        self.next_message_id += 1
         self.messages.append(
             {
                 "chat_id": chat_id,
+                "message_id": message_id,
                 "text": text,
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": disable_web_page_preview,
             }
         )
-        return object()
+        return FakeSentMessage(message_id)
 
     async def edit_message_text(
         self,
@@ -140,6 +144,11 @@ class FakeNotificationBot:
             }
         )
         return object()
+
+
+class FakeSentMessage:
+    def __init__(self, message_id: int) -> None:
+        self.message_id = message_id
 
 
 class FakeUploadStatus:
@@ -315,8 +324,10 @@ def test_upload_worker_edits_upload_progress_message(tmp_path: Path) -> None:
     assert any("⬆️ Uploading" in text and "<b>0%</b>" in text for text in texts)
     assert any("⬆️ Uploading" in text and "<b>100%</b>" in text for text in texts)
     assert any("✅ Done" in text for text in texts)
+    assert any("Drive file ID: drive-file-id" in text for text in texts)
+    assert any("Destination: My Drive/Uploads" in text for text in texts)
     assert all(message["chat_id"] == 123 for message in bot.messages)
-    assert all(message["message_id"] == 99 for message in bot.messages)
+    assert all(message["message_id"] == 1000 for message in bot.messages)
     database.close()
 
 
@@ -667,8 +678,8 @@ def test_upload_worker_sends_transient_failure_notification(tmp_path: Path) -> N
 
     asyncio.run(worker.run_once())
 
-    assert len(bot.messages) == 1
-    message = bot.messages[0]
+    assert len(bot.messages) == 2
+    message = bot.messages[-1]
     assert message["chat_id"] == 456
     assert message["parse_mode"] == "HTML"
     assert "Upload Delayed" in str(message["text"])
@@ -775,8 +786,8 @@ def test_upload_worker_sends_permanent_failure_notification(tmp_path: Path) -> N
     updated = repository.get_file_record(file_record.id)
     assert updated is not None
     assert updated.status == FILE_STATUS_FAILED
-    assert len(bot.messages) == 1
-    message = bot.messages[0]
+    assert len(bot.messages) == 2
+    message = bot.messages[-1]
     assert message["chat_id"] == 789
     assert "Upload Failed" in str(message["text"])
     assert "Google Drive uploader is not configured." in str(message["text"])

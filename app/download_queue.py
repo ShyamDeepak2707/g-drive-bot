@@ -361,10 +361,9 @@ class DownloadQueue:
                         "attempt": job.attempts,
                     },
                 )
-                await self._safe_edit_message(
+                await self._safe_delete_message(
                     chat_id=job.chat_id,
                     message_id=job.status_message_id,
-                    message=_download_complete_message(job, result),
                 )
                 await self._send_rename_prompt(job, result.filename)
                 return
@@ -525,6 +524,15 @@ class DownloadQueue:
                 "failed to edit progress message", extra={"event": "progress_edit_failed"}
             )
 
+    async def _safe_delete_message(self, chat_id: int, message_id: int) -> None:
+        try:
+            await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramApiError:
+            self._logger.warning(
+                "failed to delete progress message",
+                extra={"event": "progress_delete_failed"},
+            )
+
 
 def _rename_callback(action: str, file_record_id: int) -> str:
     return f"{constants.RENAME_CALLBACK_PREFIX}:{action}:{file_record_id}"
@@ -561,18 +569,6 @@ def _download_progress_message(job: DownloadJob, snapshot: ProgressSnapshot) -> 
         total_size=format_bytes(snapshot.total),
         speed=_download_speed(snapshot),
         eta=_download_eta(snapshot),
-    )
-
-
-def _download_complete_message(job: DownloadJob, result: DownloadResult) -> TelegramMessage:
-    downloaded_size = result.size if result.size is not None else job.metadata.size
-    return progress_card(
-        "📥 Downloading",
-        filename=result.filename,
-        percent=100,
-        transferred_size=format_bytes(downloaded_size),
-        total_size=format_bytes(downloaded_size),
-        status_text="✅ Done",
     )
 
 

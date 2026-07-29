@@ -23,6 +23,7 @@ class FakeBot:
         self.edits: list[str] = []
         self.edit_kwargs: list[dict[str, object]] = []
         self.messages: list[str] = []
+        self.deleted_messages: list[tuple[int, int]] = []
 
     async def edit_message_text(
         self,
@@ -40,6 +41,9 @@ class FakeBot:
     ) -> None:
         del chat_id, reply_markup
         self.messages.append(text)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
 
 class CountingRepository(DatabaseRepository):
@@ -262,7 +266,7 @@ def test_download_queue_processes_job(tmp_path: Path) -> None:
     assert snapshot.failed_since_startup == 0
 
 
-def test_download_queue_edits_progress_to_done_on_completion(tmp_path: Path) -> None:
+def test_download_queue_deletes_progress_message_on_completion(tmp_path: Path) -> None:
     database = SQLiteDatabase(tmp_path / "app.sqlite3")
     database.initialize()
     repository = DatabaseRepository(database)
@@ -293,12 +297,9 @@ def test_download_queue_edits_progress_to_done_on_completion(tmp_path: Path) -> 
 
     asyncio.run(run_queue())
 
-    progress_edits = [edit for edit in bot.edits if "<b>📥 Downloading</b>" in edit]
-    assert any("████████████████████ <b>100%</b>" in edit for edit in progress_edits)
-    assert progress_edits[-1] == bot.edits[-1]
-    assert "████████████████████ <b>100%</b>" in bot.edits[-1]
-    assert "✅ Done" in bot.edits[-1]
-    assert "💾 50 B / 50 B" in bot.edits[-1]
+    assert bot.deleted_messages == [(metadata.chat_id, 99)]
+    assert bot.messages
+    assert "Rename it, then choose a destination folder." in bot.messages[-1]
     assert len(bot.messages) == 1
 
 
