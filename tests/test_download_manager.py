@@ -42,12 +42,17 @@ class FakeBotApiClient:
         self.file = file or FakeBotApiFile()
         self.requested_file_id: str | None = None
         self.fail_get_file = False
+        self.get_me_calls = 0
 
     async def get_file(self, file_id: str) -> BotApiFile:
         self.requested_file_id = file_id
         if self.fail_get_file:
             raise BadRequest("file not found")
         return self.file
+
+    async def get_me(self) -> object:
+        self.get_me_calls += 1
+        return type("BotUser", (), {"id": 999, "username": "test_bot"})()
 
 
 class FakePyrogramMessage:
@@ -104,7 +109,7 @@ class FakePyrogramClient:
         self.resolved_chat_id = resolved_chat_id
         self.document_size = document_size
         self.downloaded_bytes = downloaded_bytes
-        self.requested_chat_id: int | None = None
+        self.requested_chat_id: int | str | None = None
         self.requested_message_id: int | None = None
         self.downloaded_message: object | None = None
         self.get_dialogs_calls = 0
@@ -117,15 +122,16 @@ class FakePyrogramClient:
         for chat_id in self.dialog_chat_ids:
             yield FakePyrogramDialog(chat_id)
 
-    async def get_messages(self, chat_id: int, message_ids: int) -> FakePyrogramMessage:
+    async def get_messages(self, chat_id: int | str, message_ids: int) -> FakePyrogramMessage:
         self.get_messages_calls += 1
         self.requested_chat_id = chat_id
         self.requested_message_id = message_ids
         if self.get_messages_peer_invalid_once and self.get_messages_calls == 1:
             raise ValueError(f"Peer id invalid: {chat_id}")
+        default_chat_id = chat_id if isinstance(chat_id, int) else 999
         return FakePyrogramMessage(
             message_ids,
-            self.resolved_chat_id if self.resolved_chat_id is not None else chat_id,
+            self.resolved_chat_id if self.resolved_chat_id is not None else default_chat_id,
             has_media=self.has_media,
             document_size=self.document_size,
         )
@@ -242,6 +248,58 @@ def test_download_manager_uses_forward_origin_with_pyrogram(tmp_path: Path) -> N
     assert session.client.requested_message_id == 99
     assert session.client.downloaded_message is not None
     assert bot.requested_file_id is None
+    assert result.path.read_bytes() == b"hello"
+
+
+def test_download_manager_uses_pyrogram_bot_dialog_without_forward_origin(
+    tmp_path: Path,
+) -> None:
+    bot = FakeBotApiClient()
+    session = FakePyrogramSession()
+    manager = DownloadManager(
+        bot=bot,
+        pyrogram_session=session,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata(message_id=212)))
+
+    assert session.started
+    assert bot.get_me_calls == 1
+    assert session.client.get_messages_calls == 1
+    assert session.client.requested_chat_id == "test_bot"
+    assert session.client.requested_message_id == 212
+    assert session.client.downloaded_message is not None
+    assert bot.requested_file_id is None
+    assert result.path.read_bytes() == b"hello"
+
+
+def test_download_manager_falls_back_to_bot_api_when_bot_dialog_has_no_media(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot = FakeBotApiClient()
+    session = FakePyrogramSession(FakePyrogramClient(has_media=False))
+    manager = DownloadManager(
+        bot=bot,
+        pyrogram_session=session,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="test"):
+        result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata()))
+
+    fallback = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "pyrogram_bot_dialog_fallback"
+    )
+    assert "does not contain the expected document media" in fallback.__dict__["error"]
+    assert bot.requested_file_id == "bot-api-file-id"
     assert result.path.read_bytes() == b"hello"
 
 
@@ -506,12 +564,13 @@ def test_download_manager_cleans_temp_files_on_cancellation(tmp_path: Path) -> N
 
 
 def _metadata(
+    message_id: int = 1,
     forward_origin_chat_id: int | None = None,
     forward_origin_message_id: int | None = None,
 ) -> FileMetadata:
     return FileMetadata(
         telegram_file_id="bot-api-file-id",
-        message_id=1,
+        message_id=message_id,
         chat_id=2,
         forward_origin_chat_id=forward_origin_chat_id,
         forward_origin_message_id=forward_origin_message_id,

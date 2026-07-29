@@ -40,11 +40,13 @@ class BotApiFile(Protocol):
 class BotApiDownloadClient(Protocol):
     async def get_file(self, file_id: str) -> BotApiFile: ...
 
+    async def get_me(self) -> object: ...
+
 
 class PyrogramDownloadClient(Protocol):
     def get_dialogs(self) -> AsyncIterator[object]: ...
 
-    async def get_messages(self, chat_id: int, message_ids: int) -> object: ...
+    async def get_messages(self, chat_id: int | str, message_ids: int) -> object: ...
 
     async def download_media(
         self,
@@ -75,6 +77,8 @@ class DownloadManager:
         self._download_dir = ensure_directory(download_dir)
         self._temp_dir = ensure_directory(temp_dir)
         self._logger = logger
+        self._bot_dialog_peer: int | str | None = None
+        self._bot_dialog_peer_id: int | None = None
 
     async def download(
         self,
@@ -112,6 +116,36 @@ class DownloadManager:
                     started_at=started_at,
                     progress_callback=progress_callback,
                 )
+            elif self._pyrogram_session is not None:
+                try:
+                    result = await self._download_via_bot_dialog(
+                        file_record_id=file_record_id,
+                        metadata=metadata,
+                        final_path=final_path,
+                        temp_path=temp_path,
+                        started_at=started_at,
+                        progress_callback=progress_callback,
+                    )
+                except DownloadError as exc:
+                    self._logger.warning(
+                        "pyrogram bot dialog download unavailable; falling back to Bot API",
+                        extra={
+                            "event": "pyrogram_bot_dialog_fallback",
+                            "file_record_id": file_record_id,
+                            "metadata_chat_id": metadata.chat_id,
+                            "metadata_message_id": metadata.message_id,
+                            "file_type": metadata.file_type.value,
+                            "error": str(exc),
+                        },
+                    )
+                    result = await self._download_via_bot_api_file_id(
+                        file_record_id=file_record_id,
+                        metadata=metadata,
+                        final_path=final_path,
+                        temp_path=temp_path,
+                        started_at=started_at,
+                        progress_callback=progress_callback,
+                    )
             else:
                 result = await self._download_via_bot_api_file_id(
                     file_record_id=file_record_id,
@@ -294,6 +328,166 @@ class DownloadManager:
             },
         )
         return result
+
+    async def _download_via_bot_dialog(
+        self,
+        file_record_id: int,
+        metadata: FileMetadata,
+        final_path: Path,
+        temp_path: Path,
+        started_at: float,
+        progress_callback: ProgressCallback | None,
+    ) -> DownloadResult:
+        if self._pyrogram_session is None:
+            raise DownloadError("Pyrogram is not configured.")
+
+        bot_peer, bot_peer_id = await self._get_bot_dialog_peer()
+        await self._pyrogram_session.start()
+        client = cast(PyrogramDownloadClient, self._pyrogram_session.client)
+        self._logger.info(
+            "download started",
+            extra={
+                "event": "download_started",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "bot_dialog_peer": bot_peer,
+                "bot_dialog_peer_id": bot_peer_id,
+                "bot_api_chat_id": metadata.chat_id,
+                "bot_api_message_id": metadata.message_id,
+                "file_type": metadata.file_type.value,
+            },
+        )
+        try:
+            message = await client.get_messages(
+                chat_id=bot_peer,
+                message_ids=metadata.message_id,
+            )
+        except Exception as exc:
+            raise DownloadError(
+                "Pyrogram could not fetch the outgoing bot-dialog message."
+            ) from exc
+
+        detected_media_type = _detect_media_type(message)
+        self._logger.info(
+            "bot-dialog source message fetched",
+            extra={
+                "event": "bot_dialog_message_fetched",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "requested_chat_id": bot_peer,
+                "requested_message_id": metadata.message_id,
+                "resolved_message_id": getattr(message, "id", None),
+                "resolved_chat_id": getattr(getattr(message, "chat", None), "id", None),
+                "resolved_chat_type": getattr(getattr(message, "chat", None), "type", None),
+                "detected_media_type": detected_media_type,
+                "document": bool(getattr(message, "document", None)),
+                "video": bool(getattr(message, "video", None)),
+                "audio": bool(getattr(message, "audio", None)),
+                "photo": bool(getattr(message, "photo", None)),
+                "animation": bool(getattr(message, "animation", None)),
+                "voice": bool(getattr(message, "voice", None)),
+                "text": getattr(message, "text", None),
+                "caption": getattr(message, "caption", None),
+            },
+        )
+        resolved_chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if bot_peer_id is not None and resolved_chat_id != bot_peer_id:
+            raise DownloadError(
+                "Bot-dialog Telegram message resolved to a different chat "
+                f"({resolved_chat_id}) than the bot peer ({bot_peer_id})."
+            )
+        if getattr(message, metadata.file_type.value, None) is None:
+            raise DownloadError(
+                "Bot-dialog Telegram message does not contain the expected "
+                f"{metadata.file_type.value} media."
+            )
+
+        async def progress(current: int, total: int) -> None:
+            if progress_callback is None:
+                return
+            await progress_callback(_progress_snapshot(current, total, metadata.size, started_at))
+
+        media = getattr(message, metadata.file_type.value)
+        expected_size = getattr(media, "file_size", None)
+        self._logger.info(
+            "download_begin",
+            extra={
+                "event": "download_begin",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "file_name": getattr(media, "file_name", None),
+                "file_size": expected_size,
+                "mime_type": getattr(media, "mime_type", None),
+            },
+        )
+        download_started_at = time.perf_counter()
+        downloaded_path = await client.download_media(
+            message,
+            file_name=str(temp_path),
+            progress=progress,
+        )
+        elapsed = time.perf_counter() - download_started_at
+        if downloaded_path is None:
+            raise DownloadError("Pyrogram did not return a downloaded file path.")
+        source_path = Path(downloaded_path)
+        actual_size = source_path.stat().st_size if source_path.exists() else None
+        self._logger.info(
+            "download_performance",
+            extra={
+                "event": "download_performance",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "seconds": elapsed,
+                "size": actual_size,
+                "average_mbps": _average_mbps(actual_size, elapsed),
+            },
+        )
+        self._logger.info(
+            "download_complete",
+            extra={
+                "event": "download_complete",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "expected_size": expected_size,
+                "actual_size": actual_size,
+                "match": actual_size == expected_size,
+            },
+        )
+        _verify_download_size(
+            source_path=source_path,
+            expected_size=expected_size if expected_size is not None else metadata.size,
+            file_record_id=file_record_id,
+            download_source="pyrogram_bot_dialog",
+            logger=self._logger,
+        )
+        result = self._finalize_download(file_record_id, metadata, source_path, final_path)
+        self._logger.info(
+            "download completed",
+            extra={
+                "event": "download_completed",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "path": str(final_path),
+                "size": result.size,
+            },
+        )
+        return result
+
+    async def _get_bot_dialog_peer(self) -> tuple[int | str, int | None]:
+        if self._bot_dialog_peer is not None:
+            return self._bot_dialog_peer, self._bot_dialog_peer_id
+        bot_user = await self._bot.get_me()
+        bot_id = getattr(bot_user, "id", None)
+        username = getattr(bot_user, "username", None)
+        if isinstance(username, str) and username.strip():
+            peer: int | str = username.strip()
+        elif isinstance(bot_id, int):
+            peer = bot_id
+        else:
+            raise DownloadError("Telegram Bot API getMe did not return a usable bot peer.")
+        self._bot_dialog_peer = peer
+        self._bot_dialog_peer_id = bot_id if isinstance(bot_id, int) else None
+        return self._bot_dialog_peer, self._bot_dialog_peer_id
 
     async def _get_forward_origin_message(
         self,
