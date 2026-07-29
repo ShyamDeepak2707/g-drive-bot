@@ -421,6 +421,7 @@ class DownloadQueue:
                         "event": "download_failed",
                         "file_record_id": job.file_record_id,
                         "attempt": job.attempts,
+                        "error": str(exc),
                     },
                 )
                 if job.attempts > self._retry_limit:
