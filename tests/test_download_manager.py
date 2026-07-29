@@ -104,16 +104,22 @@ class FakePyrogramClient:
         resolved_chat_id: int | None = None,
         document_size: int = 5,
         downloaded_bytes: bytes = b"hello",
+        search_messages: list[FakePyrogramMessage] | None = None,
+        chat_history: list[FakePyrogramMessage] | None = None,
     ) -> None:
         self.has_media = has_media
         self.resolved_chat_id = resolved_chat_id
         self.document_size = document_size
         self.downloaded_bytes = downloaded_bytes
+        self.search_message_results = search_messages or []
+        self.chat_history_results = chat_history or []
         self.requested_chat_id: int | str | None = None
         self.requested_message_id: int | None = None
         self.downloaded_message: object | None = None
         self.get_dialogs_calls = 0
         self.get_messages_calls = 0
+        self.search_messages_calls = 0
+        self.get_chat_history_calls = 0
         self.get_messages_peer_invalid_once = False
         self.dialog_chat_ids: list[int] = []
 
@@ -121,6 +127,11 @@ class FakePyrogramClient:
         self.get_dialogs_calls += 1
         for chat_id in self.dialog_chat_ids:
             yield FakePyrogramDialog(chat_id)
+
+    async def get_chat_history(self, chat_id: int | str, limit: int = 0) -> object:
+        self.get_chat_history_calls += 1
+        for message in self.chat_history_results[:limit]:
+            yield message
 
     async def get_messages(self, chat_id: int | str, message_ids: int) -> FakePyrogramMessage:
         self.get_messages_calls += 1
@@ -135,6 +146,20 @@ class FakePyrogramClient:
             has_media=self.has_media,
             document_size=self.document_size,
         )
+
+    async def search_messages(
+        self,
+        chat_id: int | str,
+        query: str = "",
+        offset: int = 0,
+        filter: object = None,
+        limit: int = 0,
+        from_user: int | str | None = None,
+    ) -> object:
+        del chat_id, query, offset, filter, from_user
+        self.search_messages_calls += 1
+        for message in self.search_message_results[:limit]:
+            yield message
 
     async def download_media(
         self,
@@ -301,6 +326,51 @@ def test_download_manager_allows_bot_dialog_peer_id_mismatch(
     assert mismatch.__dict__["bot_dialog_peer_id"] == 999
     assert mismatch.__dict__["resolved_chat_id"] == 1846101730
     assert session.client.downloaded_message is not None
+    assert bot.requested_file_id is None
+    assert result.path.read_bytes() == b"hello"
+
+
+def test_download_manager_searches_bot_dialog_when_direct_message_size_differs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    matching_message = FakePyrogramMessage(
+        message_id=777,
+        chat_id=1846101730,
+        document_size=5,
+    )
+    client = FakePyrogramClient(
+        resolved_chat_id=1846101730,
+        document_size=303 * 1024 * 1024,
+        search_messages=[matching_message],
+    )
+    bot = FakeBotApiClient()
+    session = FakePyrogramSession(client)
+    manager = DownloadManager(
+        bot=bot,
+        pyrogram_session=session,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="test"):
+        result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata(message_id=214)))
+
+    mismatch = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "bot_dialog_direct_message_mismatch"
+    )
+    resolved = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "bot_dialog_matching_message_resolved"
+    )
+    assert mismatch.__dict__["resolved_size"] == 303 * 1024 * 1024
+    assert resolved.__dict__["resolved_message_id"] == 777
+    assert client.search_messages_calls == 1
+    assert client.downloaded_message is matching_message
     assert bot.requested_file_id is None
     assert result.path.read_bytes() == b"hello"
 

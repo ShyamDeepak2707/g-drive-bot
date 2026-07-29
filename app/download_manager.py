@@ -19,6 +19,7 @@ from app.progress import ProgressSnapshot
 from app.utils.filesystem import ensure_directory, unique_path
 
 ProgressCallback = Callable[[ProgressSnapshot], Awaitable[None]]
+BOT_DIALOG_SEARCH_LIMIT = 100
 
 
 class BotApiFile(Protocol):
@@ -46,7 +47,23 @@ class BotApiDownloadClient(Protocol):
 class PyrogramDownloadClient(Protocol):
     def get_dialogs(self) -> AsyncIterator[object]: ...
 
+    def get_chat_history(
+        self,
+        chat_id: int | str,
+        limit: int = 0,
+    ) -> AsyncIterator[object] | None: ...
+
     async def get_messages(self, chat_id: int | str, message_ids: int) -> object: ...
+
+    def search_messages(
+        self,
+        chat_id: int | str,
+        query: str = "",
+        offset: int = 0,
+        filter: object = None,
+        limit: int = 0,
+        from_user: int | str | None = None,
+    ) -> AsyncIterator[object] | None: ...
 
     async def download_media(
         self,
@@ -265,6 +282,13 @@ class DownloadManager:
 
         media = getattr(message, metadata.file_type.value)
         expected_size = getattr(media, "file_size", None)
+        _verify_remote_media_size(
+            expected_size=metadata.size,
+            resolved_size=expected_size,
+            file_record_id=file_record_id,
+            download_source="pyrogram_forward_origin",
+            logger=self._logger,
+        )
         self._logger.info(
             "download_begin",
             extra={
@@ -411,6 +435,42 @@ class DownloadManager:
                 "Bot-dialog Telegram message does not contain the expected "
                 f"{metadata.file_type.value} media."
             )
+        if not _message_matches_metadata(message, metadata):
+            self._logger.warning(
+                "bot-dialog direct message did not match stored media metadata",
+                extra={
+                    "event": "bot_dialog_direct_message_mismatch",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "requested_message_id": metadata.message_id,
+                    "resolved_message_id": getattr(message, "id", None),
+                    "expected_file_name": metadata.original_name,
+                    "resolved_file_name": _message_media_file_name(message, metadata),
+                    "expected_size": metadata.size,
+                    "resolved_size": _message_media_size(message, metadata),
+                    "detected_media_type": detected_media_type,
+                },
+            )
+            message = await self._find_bot_dialog_media_message(
+                client=client,
+                bot_peer=bot_peer,
+                metadata=metadata,
+                file_record_id=file_record_id,
+            )
+            detected_media_type = _detect_media_type(message)
+            self._logger.info(
+                "bot-dialog matching media message resolved",
+                extra={
+                    "event": "bot_dialog_matching_message_resolved",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "resolved_message_id": getattr(message, "id", None),
+                    "resolved_chat_id": getattr(getattr(message, "chat", None), "id", None),
+                    "detected_media_type": detected_media_type,
+                    "file_name": _message_media_file_name(message, metadata),
+                    "file_size": _message_media_size(message, metadata),
+                },
+            )
 
         async def progress(current: int, total: int) -> None:
             if progress_callback is None:
@@ -419,6 +479,13 @@ class DownloadManager:
 
         media = getattr(message, metadata.file_type.value)
         expected_size = getattr(media, "file_size", None)
+        _verify_remote_media_size(
+            expected_size=metadata.size,
+            resolved_size=expected_size,
+            file_record_id=file_record_id,
+            download_source="pyrogram_bot_dialog",
+            logger=self._logger,
+        )
         self._logger.info(
             "download_begin",
             extra={
@@ -482,6 +549,81 @@ class DownloadManager:
             },
         )
         return result
+
+    async def _find_bot_dialog_media_message(
+        self,
+        client: PyrogramDownloadClient,
+        bot_peer: int | str,
+        metadata: FileMetadata,
+        file_record_id: int,
+    ) -> object:
+        query = metadata.original_name or ""
+        messages_filter = _pyrogram_messages_filter(metadata.file_type.value)
+        searched = 0
+
+        search_results = client.search_messages(
+            chat_id=bot_peer,
+            query=query,
+            filter=messages_filter,
+            limit=BOT_DIALOG_SEARCH_LIMIT,
+        )
+        if search_results is not None:
+            async for candidate in search_results:
+                searched += 1
+                if _message_matches_metadata(candidate, metadata):
+                    self._logger.info(
+                        "bot-dialog matching media found by search",
+                        extra={
+                            "event": "bot_dialog_match_found",
+                            "file_record_id": file_record_id,
+                            "strategy": "search_messages",
+                            "scanned": searched,
+                            "resolved_message_id": getattr(candidate, "id", None),
+                            "file_name": _message_media_file_name(candidate, metadata),
+                            "file_size": _message_media_size(candidate, metadata),
+                        },
+                    )
+                    return candidate
+
+        history_results = client.get_chat_history(
+            chat_id=bot_peer,
+            limit=BOT_DIALOG_SEARCH_LIMIT,
+        )
+        if history_results is not None:
+            async for candidate in history_results:
+                searched += 1
+                if _message_matches_metadata(candidate, metadata):
+                    self._logger.info(
+                        "bot-dialog matching media found by history scan",
+                        extra={
+                            "event": "bot_dialog_match_found",
+                            "file_record_id": file_record_id,
+                            "strategy": "get_chat_history",
+                            "scanned": searched,
+                            "resolved_message_id": getattr(candidate, "id", None),
+                            "file_name": _message_media_file_name(candidate, metadata),
+                            "file_size": _message_media_size(candidate, metadata),
+                        },
+                    )
+                    return candidate
+
+        self._logger.warning(
+            "bot-dialog matching media was not found",
+            extra={
+                "event": "bot_dialog_match_not_found",
+                "file_record_id": file_record_id,
+                "bot_dialog_peer": bot_peer,
+                "expected_file_name": metadata.original_name,
+                "expected_size": metadata.size,
+                "file_type": metadata.file_type.value,
+                "scanned": searched,
+            },
+        )
+        raise DownloadError(
+            "Pyrogram could not locate the matching media in the bot dialog. "
+            "Send the file to the bot again, or forward it with sender information visible "
+            "so the original channel message can be resolved."
+        )
 
     async def _get_bot_dialog_peer(self) -> tuple[int | str, int | None]:
         if self._bot_dialog_peer is not None:
@@ -669,6 +811,57 @@ def _detect_media_type(message: object) -> str | None:
     return None
 
 
+def _message_matches_metadata(message: object, metadata: FileMetadata) -> bool:
+    media = getattr(message, metadata.file_type.value, None)
+    if media is None:
+        return False
+    resolved_size = getattr(media, "file_size", None)
+    if metadata.size is not None and resolved_size is not None and resolved_size != metadata.size:
+        return False
+    resolved_file_name = getattr(media, "file_name", None)
+    if (
+        metadata.original_name
+        and isinstance(resolved_file_name, str)
+        and resolved_file_name
+        and resolved_file_name != metadata.original_name
+    ):
+        return False
+    return True
+
+
+def _message_media_size(message: object, metadata: FileMetadata) -> int | None:
+    media = getattr(message, metadata.file_type.value, None)
+    if media is None:
+        return None
+    size = getattr(media, "file_size", None)
+    return size if isinstance(size, int) else None
+
+
+def _message_media_file_name(message: object, metadata: FileMetadata) -> str | None:
+    media = getattr(message, metadata.file_type.value, None)
+    if media is None:
+        return None
+    file_name = getattr(media, "file_name", None)
+    return file_name if isinstance(file_name, str) else None
+
+
+def _pyrogram_messages_filter(file_type: str) -> object:
+    try:
+        from pyrogram import enums
+    except ImportError:
+        return None
+
+    filters = {
+        "document": enums.MessagesFilter.DOCUMENT,
+        "video": enums.MessagesFilter.VIDEO,
+        "audio": enums.MessagesFilter.AUDIO,
+        "photo": enums.MessagesFilter.PHOTO,
+        "animation": enums.MessagesFilter.ANIMATION,
+        "voice": enums.MessagesFilter.VOICE_NOTE,
+    }
+    return filters.get(file_type)
+
+
 def _download_source(metadata: FileMetadata) -> str:
     if (
         metadata.forward_origin_chat_id is not None
@@ -750,4 +943,29 @@ def _verify_download_size(
     raise DownloadError(
         "Downloaded file size mismatch: "
         f"expected {expected_size} bytes, got {actual_size} bytes."
+    )
+
+
+def _verify_remote_media_size(
+    expected_size: int | None,
+    resolved_size: int | None,
+    file_record_id: int,
+    download_source: str,
+    logger: logging.Logger,
+) -> None:
+    if expected_size is None or resolved_size is None or expected_size == resolved_size:
+        return
+    logger.warning(
+        "remote Telegram media size mismatch",
+        extra={
+            "event": "remote_media_size_mismatch",
+            "download_source": download_source,
+            "file_record_id": file_record_id,
+            "expected_size": expected_size,
+            "resolved_size": resolved_size,
+        },
+    )
+    raise DownloadError(
+        "Remote Telegram media size mismatch: "
+        f"expected {expected_size} bytes, got {resolved_size} bytes."
     )
