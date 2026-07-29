@@ -49,6 +49,8 @@ class PyrogramDownloadClient(Protocol):
 
     async def get_me(self) -> object: ...
 
+    async def get_chat(self, chat_id: int | str) -> object: ...
+
     def get_chat_history(
         self,
         chat_id: int | str,
@@ -386,6 +388,11 @@ class DownloadManager:
             file_record_id=file_record_id,
             download_source="pyrogram_bot_dialog",
         )
+        await self._log_bot_dialog_chat_diagnostics(
+            client=client,
+            bot_peer=bot_peer,
+            file_record_id=file_record_id,
+        )
         self._logger.info(
             "download started",
             extra={
@@ -411,6 +418,30 @@ class DownloadManager:
 
         detected_media_type = _detect_media_type(message)
         self._logger.info(
+            "bot-dialog get_messages returned message type",
+            extra={
+                "event": "bot_dialog_get_messages_type",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "requested_message_id": metadata.message_id,
+                "message_type": type(message).__name__,
+                "message_empty": bool(getattr(message, "empty", False)),
+            },
+        )
+        if bool(getattr(message, "empty", False)):
+            self._logger.warning(
+                "bot-dialog get_messages returned an empty placeholder message",
+                extra={
+                    "event": "bot_dialog_empty_placeholder_message",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "requested_message_id": metadata.message_id,
+                    "message_type": type(message).__name__,
+                    "resolved_message_id": getattr(message, "id", None),
+                    "resolved_chat_id": getattr(getattr(message, "chat", None), "id", None),
+                },
+            )
+        self._logger.info(
             "Fetched message: id=%s chat_id=%s document=%s video=%s audio=%s text=%r",
             getattr(message, "id", None),
             getattr(getattr(message, "chat", None), "id", None),
@@ -427,6 +458,8 @@ class DownloadManager:
                 "file_record_id": file_record_id,
                 "requested_chat_id": bot_peer,
                 "requested_message_id": metadata.message_id,
+                "message_type": type(message).__name__,
+                "message_empty": bool(getattr(message, "empty", False)),
                 "resolved_message_id": getattr(message, "id", None),
                 "resolved_chat_id": getattr(getattr(message, "chat", None), "id", None),
                 "resolved_chat_type": getattr(getattr(message, "chat", None), "type", None),
@@ -647,6 +680,109 @@ class DownloadManager:
                 "pyrogram_username": getattr(account, "username", None),
                 "pyrogram_phone_number": getattr(account, "phone_number", None),
                 "pyrogram_first_name": getattr(account, "first_name", None),
+            },
+        )
+
+    async def _log_bot_dialog_chat_diagnostics(
+        self,
+        client: PyrogramDownloadClient,
+        bot_peer: int | str,
+        file_record_id: int,
+    ) -> None:
+        try:
+            chat = await client.get_chat(bot_peer)
+        except Exception as exc:
+            self._logger.warning(
+                "could not fetch Pyrogram bot dialog chat",
+                extra={
+                    "event": "bot_dialog_get_chat_diagnostic_failed",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "bot_peer": bot_peer,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+        else:
+            self._logger.info(
+                "Pyrogram bot dialog chat resolved",
+                extra={
+                    "event": "bot_dialog_get_chat_diagnostic",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "bot_peer": bot_peer,
+                    "chat_id": getattr(chat, "id", None),
+                    "chat_username": getattr(chat, "username", None),
+                    "chat_title": getattr(chat, "title", None),
+                    "chat_type": getattr(chat, "type", None),
+                },
+            )
+
+        self._logger.info(
+            "logging latest bot-dialog history messages",
+            extra={
+                "event": "bot_dialog_latest_history_diagnostic_started",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "bot_peer": bot_peer,
+                "limit": 20,
+            },
+        )
+        history = client.get_chat_history(chat_id=bot_peer, limit=20)
+        if history is None:
+            self._logger.warning(
+                "Pyrogram returned no bot-dialog history iterator",
+                extra={
+                    "event": "bot_dialog_latest_history_unavailable",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "bot_peer": bot_peer,
+                },
+            )
+            return
+        count = 0
+        async for message in history:
+            count += 1
+            self._logger.info(
+                "bot-dialog latest history message",
+                extra={
+                    "event": "bot_dialog_latest_history_message",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "bot_peer": bot_peer,
+                    "history_index": count,
+                    "message_id": getattr(message, "id", None),
+                    "message_date": getattr(message, "date", None),
+                    "message_empty": bool(getattr(message, "empty", False)),
+                    "message_service": getattr(message, "service", None),
+                    "message_chat_id": getattr(getattr(message, "chat", None), "id", None),
+                    "message_chat_username": getattr(
+                        getattr(message, "chat", None), "username", None
+                    ),
+                    "message_from_user_id": getattr(
+                        getattr(message, "from_user", None), "id", None
+                    ),
+                    "message_outgoing": getattr(message, "outgoing", None),
+                    "message_text": getattr(message, "text", None),
+                    "has_document": bool(getattr(message, "document", None)),
+                    "has_video": bool(getattr(message, "video", None)),
+                    "has_audio": bool(getattr(message, "audio", None)),
+                    "document_file_name": getattr(
+                        getattr(message, "document", None), "file_name", None
+                    ),
+                    "document_file_unique_id": getattr(
+                        getattr(message, "document", None), "file_unique_id", None
+                    ),
+                },
+            )
+        self._logger.info(
+            "logged latest bot-dialog history messages",
+            extra={
+                "event": "bot_dialog_latest_history_diagnostic_completed",
+                "download_source": "pyrogram_bot_dialog",
+                "file_record_id": file_record_id,
+                "bot_peer": bot_peer,
+                "message_count": count,
             },
         )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,12 @@ class FakePyrogramMessage:
         document_unique_id: str = "unique-file-id",
     ) -> None:
         self.id = message_id
+        self.date = datetime(2026, 7, 29, 5, 0, 0, tzinfo=UTC)
+        self.empty = False
+        self.service = None
         self.chat = FakePyrogramChat(chat_id)
+        self.from_user = type("FakeFromUser", (), {"id": 123456})()
+        self.outgoing = True
         self.document = (
             FakePyrogramDocument(document_size, document_unique_id) if has_media else None
         )
@@ -147,6 +153,10 @@ class FakePyrogramClient:
                 "first_name": "Samuel",
             },
         )()
+
+    async def get_chat(self, chat_id: int | str) -> FakePyrogramChat:
+        resolved_chat_id = chat_id if isinstance(chat_id, int) else 999
+        return FakePyrogramChat(resolved_chat_id)
 
     async def get_chat_history(self, chat_id: int | str, limit: int = 0) -> object:
         self.get_chat_history_calls += 1
