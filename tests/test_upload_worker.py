@@ -78,6 +78,31 @@ class BlockingUploader(FakeUploader):
         return super().upload_file(local_path, filename, mime_type, folder_id)
 
 
+class FakeNotificationBot:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.messages: list[dict[str, object]] = []
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> object:
+        if self.fail:
+            raise RuntimeError("Telegram send failed")
+        self.messages.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": disable_web_page_preview,
+            }
+        )
+        return object()
+
+
 class FakeDriveRequest:
     def __init__(self, response: dict[str, object]) -> None:
         self.response = response
@@ -523,6 +548,34 @@ def test_upload_worker_schedules_transient_failure_for_later_retry(tmp_path: Pat
     database.close()
 
 
+def test_upload_worker_sends_transient_failure_notification(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    _ready_file(repository, local_path=local_path, status_chat_id=456)
+    uploader = FakeUploader(fail=True)
+    bot = FakeNotificationBot()
+    worker = UploadWorker(
+        repository,
+        logging.getLogger("test.upload_worker"),
+        uploader,
+        notification_bot=bot,
+    )
+
+    asyncio.run(worker.run_once())
+
+    assert len(bot.messages) == 1
+    message = bot.messages[0]
+    assert message["chat_id"] == 456
+    assert message["parse_mode"] == "HTML"
+    assert "Upload Delayed" in str(message["text"])
+    assert "temporary drive failure" in str(message["text"])
+    assert "Retry Scheduled" in str(message["text"])
+    database.close()
+
+
 def test_upload_worker_logs_retry_reason_and_next_retry_time(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -602,6 +655,34 @@ def test_upload_worker_missing_uploader_is_permanent_failure(tmp_path: Path) -> 
     database.close()
 
 
+def test_upload_worker_sends_permanent_failure_notification(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    file_record = _ready_file(repository, local_path=local_path, status_chat_id=789)
+    bot = FakeNotificationBot()
+    worker = UploadWorker(
+        repository,
+        logging.getLogger("test.upload_worker"),
+        notification_bot=bot,
+    )
+
+    asyncio.run(worker.run_once())
+
+    updated = repository.get_file_record(file_record.id)
+    assert updated is not None
+    assert updated.status == FILE_STATUS_FAILED
+    assert len(bot.messages) == 1
+    message = bot.messages[0]
+    assert message["chat_id"] == 789
+    assert "Upload Failed" in str(message["text"])
+    assert "Google Drive uploader is not configured." in str(message["text"])
+    assert "Failed" in str(message["text"])
+    database.close()
+
+
 def test_upload_worker_does_not_retry_missing_local_file(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -630,6 +711,37 @@ def test_upload_worker_does_not_retry_missing_local_file(
         getattr(record, "event", None) == "upload_failed_permanent"
         and getattr(record, "file_record_id", None) == file_record.id
         and getattr(record, "retry_reason", None) == "missing_local_file"
+        for record in caplog.records
+    )
+    database.close()
+
+
+def test_upload_worker_notification_failure_does_not_block_failure_state(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    file_record = _ready_file(repository, local_path=local_path, status_chat_id=789)
+    bot = FakeNotificationBot(fail=True)
+    worker = UploadWorker(
+        repository,
+        logging.getLogger("test.upload_worker"),
+        notification_bot=bot,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="test.upload_worker"):
+        asyncio.run(worker.run_once())
+
+    updated = repository.get_file_record(file_record.id)
+    assert updated is not None
+    assert updated.status == FILE_STATUS_FAILED
+    assert any(
+        getattr(record, "event", None) == "upload_failure_notification_failed"
+        and getattr(record, "file_record_id", None) == file_record.id
         for record in caplog.records
     )
     database.close()
@@ -749,6 +861,8 @@ def _ready_file(
     repository: DatabaseRepository,
     message_id: int = 1,
     local_path: Path | None = None,
+    status_chat_id: int | None = None,
+    status_message_id: int | None = None,
 ) -> FileRecord:
     user = repository.create_user(telegram_user_id=message_id, username=None, first_name=None)
     expected_size = local_path.stat().st_size if local_path is not None else 12
@@ -773,6 +887,8 @@ def _ready_file(
             file_record.id,
             local_path=str(local_path),
             total_bytes=local_path.stat().st_size,
+            status_chat_id=status_chat_id,
+            status_message_id=status_message_id,
         )
     repository.set_file_destination_folder(
         file_record.id,

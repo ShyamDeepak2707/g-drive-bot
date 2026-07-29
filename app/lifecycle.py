@@ -114,6 +114,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
         repository=repository,
         logger=get_logger("app.upload_worker"),
         uploader=GoogleDriveUploader(drive_service) if drive_service is not None else None,
+        notification_bot=telegram_application.bot,
     )
     startup_recovery_summary = await run_startup_recovery(
         download_queue=download_queue,

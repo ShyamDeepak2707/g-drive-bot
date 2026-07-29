@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 from app import constants
 from app.database import DatabaseRepository, FileRecord
 from app.job_state import InvalidJobStateTransition, JobState, should_start_upload
+from app.ui.messages import TelegramMessage, error_card, warning_card
 
 
 class UploadError(Exception):
@@ -86,6 +87,16 @@ class DriveUploader(Protocol):
     ) -> UploadedFile: ...
 
 
+class UploadNotificationBot(Protocol):
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> object: ...
+
+
 class GoogleDriveUploader:
     def __init__(self, service: Any) -> None:
         self._service = service
@@ -145,6 +156,7 @@ class UploadWorker:
         repository: DatabaseRepository,
         logger: logging.Logger,
         uploader: DriveUploader | None = None,
+        notification_bot: UploadNotificationBot | None = None,
         retry_limit: int = constants.UPLOAD_RETRY_LIMIT,
         retry_backoff_base_seconds: float = constants.UPLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.UPLOAD_RETRY_MAX_DELAY_SECONDS,
@@ -152,6 +164,7 @@ class UploadWorker:
         self._repository = repository
         self._logger = logger
         self._uploader = uploader
+        self._notification_bot = notification_bot
         self._retry_limit = retry_limit
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
@@ -408,7 +421,7 @@ class UploadWorker:
             if self._is_cancel_requested(updated.id):
                 self._mark_upload_cancelled(updated.id, source="upload_exception")
                 return
-            self._handle_upload_failure(updated, exc)
+            await self._handle_upload_failure(updated, exc)
             return
 
         uploaded = self._repository.transition_file_state(
@@ -525,7 +538,7 @@ class UploadWorker:
             actual_size=uploaded_file.size,
         )
 
-    def _handle_upload_failure(self, file_record: FileRecord, exc: Exception) -> None:
+    async def _handle_upload_failure(self, file_record: FileRecord, exc: Exception) -> None:
         classification = _classify_upload_failure(exc)
         extra: dict[str, object] = {
             "file_record_id": file_record.id,
@@ -557,6 +570,12 @@ class UploadWorker:
                 },
             )
             self._failed_since_startup += 1
+            await self._notify_upload_failure(
+                file_record=file_record,
+                exc=exc,
+                classification=classification,
+                terminal=True,
+            )
             return
 
         next_retry_count = file_record.upload_retry_count + 1
@@ -576,6 +595,12 @@ class UploadWorker:
                 },
             )
             self._failed_since_startup += 1
+            await self._notify_upload_failure(
+                file_record=file_record,
+                exc=exc,
+                classification=classification,
+                terminal=True,
+            )
             return
 
         delay_seconds = _retry_delay(
@@ -601,6 +626,14 @@ class UploadWorker:
                 "retry_after": retry_after.isoformat(),
                 "retry_delay_seconds": delay_seconds,
             },
+        )
+        await self._notify_upload_failure(
+            file_record=file_record,
+            exc=exc,
+            classification=classification,
+            terminal=False,
+            retry_after=retry_after,
+            retry_count=next_retry_count,
         )
 
     def _finalize_uploaded(self, file_record: FileRecord) -> bool:
@@ -709,6 +742,70 @@ class UploadWorker:
             },
         )
 
+    async def _notify_upload_failure(
+        self,
+        *,
+        file_record: FileRecord,
+        exc: Exception,
+        classification: _UploadFailureClassification,
+        terminal: bool,
+        retry_after: datetime | None = None,
+        retry_count: int | None = None,
+    ) -> None:
+        if self._notification_bot is None:
+            return
+
+        download = self._repository.get_download(file_record.id)
+        if download is None or download.status_chat_id is None:
+            self._logger.info(
+                "upload failure notification skipped because no Telegram chat is stored",
+                extra={
+                    "event": "upload_failure_notification_skipped",
+                    "file_record_id": file_record.id,
+                    "download_record_present": download is not None,
+                },
+            )
+            return
+
+        message = _upload_failure_message(
+            file_record=file_record,
+            exc=exc,
+            classification=classification,
+            terminal=terminal,
+            retry_after=retry_after,
+            retry_count=retry_count,
+        )
+        try:
+            await self._notification_bot.send_message(
+                chat_id=download.status_chat_id,
+                text=message.text,
+                parse_mode=message.parse_mode,
+                disable_web_page_preview=message.disable_web_page_preview,
+            )
+        except Exception as notify_exc:
+            self._logger.warning(
+                "upload failure notification failed",
+                extra={
+                    "event": "upload_failure_notification_failed",
+                    "file_record_id": file_record.id,
+                    "status_chat_id": download.status_chat_id,
+                    "error": str(notify_exc),
+                    "error_type": type(notify_exc).__name__,
+                },
+            )
+            return
+
+        self._logger.info(
+            "upload failure notification sent",
+            extra={
+                "event": "upload_failure_notification_sent",
+                "file_record_id": file_record.id,
+                "status_chat_id": download.status_chat_id,
+                "terminal": terminal,
+                "retry_reason": classification.reason,
+            },
+        )
+
 
 def _parse_drive_size(value: object) -> int | None:
     if value is None:
@@ -725,6 +822,49 @@ def _parse_drive_size(value: object) -> int | None:
 
 def _file_record_filename(file_record: FileRecord) -> str:
     return file_record.original_name or f"{file_record.file_type or 'file'}-{file_record.id}"
+
+
+def _upload_failure_message(
+    *,
+    file_record: FileRecord,
+    exc: Exception,
+    classification: _UploadFailureClassification,
+    terminal: bool,
+    retry_after: datetime | None,
+    retry_count: int | None,
+) -> TelegramMessage:
+    reason = _truncate_text(str(exc), 240)
+    fields: dict[str, object] = {
+        "File": _file_record_filename(file_record),
+        "Reason": reason,
+    }
+    if terminal:
+        fields["Status"] = "Failed"
+        return error_card(
+            "Upload Failed",
+            fields=fields,
+            footer="Use /failed for the saved failure summary.",
+        )
+
+    fields["Status"] = "Retry Scheduled"
+    if retry_count is not None:
+        fields["Retry attempt"] = retry_count
+    if retry_after is not None:
+        fields["Next retry"] = retry_after.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    fields["Retry reason"] = classification.reason
+    return warning_card(
+        "Upload Delayed",
+        fields=fields,
+        footer="The bot will retry automatically.",
+    )
+
+
+def _truncate_text(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    if max_length <= 3:
+        return value[:max_length]
+    return f"{value[: max_length - 3]}..."
 
 
 def _delete_file_if_present(path: Path) -> None:
