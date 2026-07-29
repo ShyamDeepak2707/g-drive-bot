@@ -47,6 +47,8 @@ class BotApiDownloadClient(Protocol):
 class PyrogramDownloadClient(Protocol):
     def get_dialogs(self) -> AsyncIterator[object]: ...
 
+    async def get_me(self) -> object: ...
+
     def get_chat_history(
         self,
         chat_id: int | str,
@@ -225,6 +227,11 @@ class DownloadManager:
 
         await self._pyrogram_session.start()
         client = cast(PyrogramDownloadClient, self._pyrogram_session.client)
+        await self._log_pyrogram_account(
+            client=client,
+            file_record_id=file_record_id,
+            download_source="pyrogram_forward_origin",
+        )
         self._logger.info(
             "download started",
             extra={
@@ -374,6 +381,11 @@ class DownloadManager:
         bot_peer, bot_peer_id = await self._get_bot_dialog_peer()
         await self._pyrogram_session.start()
         client = cast(PyrogramDownloadClient, self._pyrogram_session.client)
+        await self._log_pyrogram_account(
+            client=client,
+            file_record_id=file_record_id,
+            download_source="pyrogram_bot_dialog",
+        )
         self._logger.info(
             "download started",
             extra={
@@ -605,6 +617,39 @@ class DownloadManager:
         )
         return result
 
+    async def _log_pyrogram_account(
+        self,
+        client: PyrogramDownloadClient,
+        file_record_id: int,
+        download_source: str,
+    ) -> None:
+        try:
+            account = await client.get_me()
+        except Exception as exc:
+            self._logger.warning(
+                "could not fetch authenticated Pyrogram account",
+                extra={
+                    "event": "pyrogram_account_diagnostic_failed",
+                    "download_source": download_source,
+                    "file_record_id": file_record_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        self._logger.info(
+            "authenticated Pyrogram account",
+            extra={
+                "event": "pyrogram_account_diagnostic",
+                "download_source": download_source,
+                "file_record_id": file_record_id,
+                "pyrogram_user_id": getattr(account, "id", None),
+                "pyrogram_username": getattr(account, "username", None),
+                "pyrogram_phone_number": getattr(account, "phone_number", None),
+                "pyrogram_first_name": getattr(account, "first_name", None),
+            },
+        )
+
     async def _find_bot_dialog_media_message(
         self,
         client: PyrogramDownloadClient,
@@ -615,7 +660,34 @@ class DownloadManager:
         query = metadata.original_name or ""
         messages_filter = _pyrogram_messages_filter(metadata.file_type.value)
         searched = 0
+        total_media_scanned = 0
+        document_candidates = 0
+        video_candidates = 0
+        audio_candidates = 0
 
+        self._logger.info(
+            "bot-dialog media search expected metadata",
+            extra={
+                "event": "bot_dialog_search_expected_metadata",
+                "file_record_id": file_record_id,
+                "bot_peer": bot_peer,
+                "expected_file_name": metadata.original_name,
+                "expected_size": metadata.size,
+                "expected_file_unique_id": metadata.telegram_file_unique_id,
+                "file_type": metadata.file_type.value,
+            },
+        )
+
+        self._logger.info(
+            "Searching bot dialog history",
+            extra={
+                "event": "bot_dialog_search_started",
+                "file_record_id": file_record_id,
+                "strategy": "search_messages",
+                "limit": BOT_DIALOG_SEARCH_LIMIT,
+                "bot_peer": bot_peer,
+            },
+        )
         search_results = client.search_messages(
             chat_id=bot_peer,
             query=query,
@@ -625,7 +697,30 @@ class DownloadManager:
         if search_results is not None:
             async for candidate in search_results:
                 searched += 1
-                if _message_matches_metadata(candidate, metadata):
+                media_type = _detect_media_type(candidate)
+                if media_type is None:
+                    continue
+                total_media_scanned += 1
+                document_candidates += 1 if media_type == "document" else 0
+                video_candidates += 1 if media_type == "video" else 0
+                audio_candidates += 1 if media_type == "audio" else 0
+                matches = _message_matches_metadata(candidate, metadata)
+                self._log_bot_dialog_media_candidate(
+                    file_record_id=file_record_id,
+                    strategy="search_messages",
+                    candidate=candidate,
+                    metadata=metadata,
+                    media_type=media_type,
+                    matches=matches,
+                )
+                if not matches:
+                    self._log_message_match_failure(
+                        file_record_id=file_record_id,
+                        strategy="search_messages",
+                        candidate=candidate,
+                        metadata=metadata,
+                    )
+                if matches:
                     self._logger.info(
                         "bot-dialog matching media found by search",
                         extra={
@@ -644,6 +739,16 @@ class DownloadManager:
                     )
                     return candidate
 
+        self._logger.info(
+            "Searching bot dialog history",
+            extra={
+                "event": "bot_dialog_search_started",
+                "file_record_id": file_record_id,
+                "strategy": "get_chat_history",
+                "limit": BOT_DIALOG_SEARCH_LIMIT,
+                "bot_peer": bot_peer,
+            },
+        )
         history_results = client.get_chat_history(
             chat_id=bot_peer,
             limit=BOT_DIALOG_SEARCH_LIMIT,
@@ -651,7 +756,30 @@ class DownloadManager:
         if history_results is not None:
             async for candidate in history_results:
                 searched += 1
-                if _message_matches_metadata(candidate, metadata):
+                media_type = _detect_media_type(candidate)
+                if media_type is None:
+                    continue
+                total_media_scanned += 1
+                document_candidates += 1 if media_type == "document" else 0
+                video_candidates += 1 if media_type == "video" else 0
+                audio_candidates += 1 if media_type == "audio" else 0
+                matches = _message_matches_metadata(candidate, metadata)
+                self._log_bot_dialog_media_candidate(
+                    file_record_id=file_record_id,
+                    strategy="get_chat_history",
+                    candidate=candidate,
+                    metadata=metadata,
+                    media_type=media_type,
+                    matches=matches,
+                )
+                if not matches:
+                    self._log_message_match_failure(
+                        file_record_id=file_record_id,
+                        strategy="get_chat_history",
+                        candidate=candidate,
+                        metadata=metadata,
+                    )
+                if matches:
                     self._logger.info(
                         "bot-dialog matching media found by history scan",
                         extra={
@@ -681,12 +809,61 @@ class DownloadManager:
                 "expected_unique_id_present": metadata.telegram_file_unique_id is not None,
                 "file_type": metadata.file_type.value,
                 "scanned": searched,
+                "total_media_messages_scanned": total_media_scanned,
+                "document_candidates": document_candidates,
+                "video_candidates": video_candidates,
+                "audio_candidates": audio_candidates,
             },
         )
         raise DownloadError(
             "Pyrogram could not locate the matching media in the bot dialog. "
             "Send the file to the bot again, or forward it with sender information visible "
             "so the original channel message can be resolved."
+        )
+
+    def _log_bot_dialog_media_candidate(
+        self,
+        file_record_id: int,
+        strategy: str,
+        candidate: object,
+        metadata: FileMetadata,
+        media_type: str,
+        matches: bool,
+    ) -> None:
+        self._logger.info(
+            "bot-dialog media candidate scanned",
+            extra={
+                "event": "bot_dialog_media_candidate_scanned",
+                "file_record_id": file_record_id,
+                "strategy": strategy,
+                "candidate_message_id": getattr(candidate, "id", None),
+                "candidate_chat_id": getattr(getattr(candidate, "chat", None), "id", None),
+                "candidate_media_type": media_type,
+                "candidate_file_name": _media_file_name(candidate, media_type),
+                "candidate_file_size": _media_size(candidate, media_type),
+                "candidate_file_unique_id": _media_unique_id(candidate, media_type),
+                "candidate_caption": getattr(candidate, "caption", None),
+                "matches_metadata": matches,
+            },
+        )
+
+    def _log_message_match_failure(
+        self,
+        file_record_id: int,
+        strategy: str,
+        candidate: object,
+        metadata: FileMetadata,
+    ) -> None:
+        self._logger.info(
+            "bot-dialog media candidate did not match metadata",
+            extra={
+                "event": "bot_dialog_candidate_match_failed",
+                "file_record_id": file_record_id,
+                "strategy": strategy,
+                "candidate_message_id": getattr(candidate, "id", None),
+                "candidate_chat_id": getattr(getattr(candidate, "chat", None), "id", None),
+                **_message_match_failure_details(candidate, metadata),
+            },
         )
 
     async def _get_bot_dialog_peer(self) -> tuple[int | str, int | None]:
@@ -703,6 +880,15 @@ class DownloadManager:
             raise DownloadError("Telegram Bot API getMe did not return a usable bot peer.")
         self._bot_dialog_peer = peer
         self._bot_dialog_peer_id = bot_id if isinstance(bot_id, int) else None
+        self._logger.info(
+            "resolved bot dialog peer",
+            extra={
+                "event": "bot_dialog_peer_resolved",
+                "bot_api_username": username,
+                "bot_api_id": bot_id,
+                "bot_dialog_peer": self._bot_dialog_peer,
+            },
+        )
         return self._bot_dialog_peer, self._bot_dialog_peer_id
 
     async def _get_forward_origin_message(
@@ -897,6 +1083,120 @@ def _message_matches_metadata(message: object, metadata: FileMetadata) -> bool:
     ):
         return False
     return True
+
+
+def _message_match_failure_details(message: object, metadata: FileMetadata) -> dict[str, object]:
+    detected_media_type = _detect_media_type(message)
+    expected_media = getattr(message, metadata.file_type.value, None)
+    if detected_media_type is None:
+        return {
+            "match_failure_reason": "no_media",
+            "expected_media_type": metadata.file_type.value,
+            "actual_media_type": None,
+            "expected_file_unique_id": metadata.telegram_file_unique_id,
+            "actual_file_unique_id": None,
+            "expected_size": metadata.size,
+            "actual_size": None,
+            "expected_file_name": metadata.original_name,
+            "actual_file_name": None,
+        }
+    if expected_media is None:
+        return {
+            "match_failure_reason": "media_type_mismatch",
+            "expected_media_type": metadata.file_type.value,
+            "actual_media_type": detected_media_type,
+            "expected_file_unique_id": metadata.telegram_file_unique_id,
+            "actual_file_unique_id": _media_unique_id(message, detected_media_type),
+            "expected_size": metadata.size,
+            "actual_size": _media_size(message, detected_media_type),
+            "expected_file_name": metadata.original_name,
+            "actual_file_name": _media_file_name(message, detected_media_type),
+        }
+
+    actual_unique_id = _message_media_unique_id(message, metadata)
+    if metadata.telegram_file_unique_id is not None and (
+        actual_unique_id is None or actual_unique_id != metadata.telegram_file_unique_id
+    ):
+        return {
+            "match_failure_reason": "file_unique_id_mismatch",
+            "expected_media_type": metadata.file_type.value,
+            "actual_media_type": detected_media_type,
+            "expected_file_unique_id": metadata.telegram_file_unique_id,
+            "actual_file_unique_id": actual_unique_id,
+            "expected_size": metadata.size,
+            "actual_size": _message_media_size(message, metadata),
+            "expected_file_name": metadata.original_name,
+            "actual_file_name": _message_media_file_name(message, metadata),
+        }
+
+    actual_size = _message_media_size(message, metadata)
+    if metadata.size is not None and actual_size is not None and actual_size != metadata.size:
+        return {
+            "match_failure_reason": "file_size_mismatch",
+            "expected_media_type": metadata.file_type.value,
+            "actual_media_type": detected_media_type,
+            "expected_file_unique_id": metadata.telegram_file_unique_id,
+            "actual_file_unique_id": actual_unique_id,
+            "expected_size": metadata.size,
+            "actual_size": actual_size,
+            "expected_file_name": metadata.original_name,
+            "actual_file_name": _message_media_file_name(message, metadata),
+        }
+
+    actual_file_name = _message_media_file_name(message, metadata)
+    if (
+        metadata.original_name
+        and isinstance(actual_file_name, str)
+        and actual_file_name
+        and actual_file_name != metadata.original_name
+    ):
+        return {
+            "match_failure_reason": "filename_mismatch",
+            "expected_media_type": metadata.file_type.value,
+            "actual_media_type": detected_media_type,
+            "expected_file_unique_id": metadata.telegram_file_unique_id,
+            "actual_file_unique_id": actual_unique_id,
+            "expected_size": metadata.size,
+            "actual_size": actual_size,
+            "expected_file_name": metadata.original_name,
+            "actual_file_name": actual_file_name,
+        }
+
+    return {
+        "match_failure_reason": "unknown",
+        "expected_media_type": metadata.file_type.value,
+        "actual_media_type": detected_media_type,
+        "expected_file_unique_id": metadata.telegram_file_unique_id,
+        "actual_file_unique_id": actual_unique_id,
+        "expected_size": metadata.size,
+        "actual_size": actual_size,
+        "expected_file_name": metadata.original_name,
+        "actual_file_name": actual_file_name,
+    }
+
+
+def _media_size(message: object, media_type: str) -> int | None:
+    media = getattr(message, media_type, None)
+    if media is None:
+        return None
+    size = getattr(media, "file_size", None)
+    return size if isinstance(size, int) else None
+
+
+def _media_unique_id(message: object, media_type: str) -> str | None:
+    media = getattr(message, media_type, None)
+    if media is None:
+        return None
+    file_unique_id = getattr(media, "file_unique_id", None)
+    return file_unique_id if isinstance(file_unique_id, str) else None
+
+
+def _media_file_name(message: object, media_type: str) -> str | None:
+    media = getattr(message, media_type, None)
+    if media is None:
+        return None
+    file_name = getattr(media, "file_name", None)
+    return file_name if isinstance(file_name, str) else None
 
 
 def _message_media_size(message: object, metadata: FileMetadata) -> int | None:

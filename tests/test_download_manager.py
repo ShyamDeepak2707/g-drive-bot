@@ -123,6 +123,7 @@ class FakePyrogramClient:
         self.requested_message_id: int | None = None
         self.downloaded_message: object | None = None
         self.get_dialogs_calls = 0
+        self.get_me_calls = 0
         self.get_messages_calls = 0
         self.search_messages_calls = 0
         self.get_chat_history_calls = 0
@@ -133,6 +134,19 @@ class FakePyrogramClient:
         self.get_dialogs_calls += 1
         for chat_id in self.dialog_chat_ids:
             yield FakePyrogramDialog(chat_id)
+
+    async def get_me(self) -> object:
+        self.get_me_calls += 1
+        return type(
+            "PyrogramUser",
+            (),
+            {
+                "id": 123456,
+                "username": "samuel",
+                "phone_number": "+10000000000",
+                "first_name": "Samuel",
+            },
+        )()
 
     async def get_chat_history(self, chat_id: int | str, limit: int = 0) -> object:
         self.get_chat_history_calls += 1
