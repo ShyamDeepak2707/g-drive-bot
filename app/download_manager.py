@@ -805,6 +805,27 @@ class DownloadManager:
         history_results = client.get_chat_history(chat_id=bot_peer, limit=10)
         if history_results is not None:
             async for message in history_results:
+                if getattr(message, "id", None) == 1163:
+                    self._logger.info(
+                        "temporary raw bot-dialog message 1163 object dump",
+                        extra={
+                            "event": "bot_dialog_message_1163_object_dump",
+                            "file_record_id": file_record_id,
+                            "bot_peer": bot_peer,
+                            "message_repr": repr(message),
+                            "message_type": type(message).__name__,
+                            "message_media": getattr(message, "media", None),
+                            "message_service": getattr(message, "service", None),
+                            "message_document": getattr(message, "document", None),
+                            "message_video": getattr(message, "video", None),
+                            "message_audio": getattr(message, "audio", None),
+                            "message_photo": getattr(message, "photo", None),
+                            "caption": getattr(message, "caption", None),
+                            "text": getattr(message, "text", None),
+                            "message_empty": bool(getattr(message, "empty", False)),
+                            "message_dict": getattr(message, "__dict__", None),
+                        },
+                    )
                 self._logger.info(
                     "temporary raw bot-dialog history message",
                     extra={
