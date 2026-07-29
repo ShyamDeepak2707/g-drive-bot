@@ -656,6 +656,24 @@ class DatabaseRepository:
             return None
         return _download_record_from_row(row)
 
+    def update_download_status_message(
+        self,
+        file_id: int,
+        *,
+        status_chat_id: int,
+        status_message_id: int,
+    ) -> DownloadRecord | None:
+        self._database.execute(
+            """
+            UPDATE downloads
+            SET status_chat_id = ?, status_message_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE file_id = ?
+            """,
+            (status_chat_id, status_message_id, file_id),
+        )
+        self._database.commit()
+        return self.get_download(file_id)
+
     def list_interrupted_downloads(self) -> list[InterruptedDownloadRecord]:
         rows = self._database.fetch_all(
             """

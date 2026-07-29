@@ -29,6 +29,7 @@ from app.shutdown_control import ShutdownController
 from app.startup_recovery import run_startup_recovery
 from app.startup_validation import validate_startup_configuration
 from app.task_manager import AsyncTaskManager
+from app.task_messages import ActiveTaskMessageRegistry
 from app.telegram_bot import configure_bot_commands, create_application, register_handlers
 from app.temp_files import TempFileService
 from app.upload_worker import GoogleDriveUploader, UploadWorker
@@ -104,17 +105,20 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
         temp_dir=settings.temp_dir,
         logger=get_logger("app.download_manager"),
     )
+    task_message_registry = ActiveTaskMessageRegistry()
     download_queue = DownloadQueue(
         repository=repository,
         download_manager=download_manager,
         bot=telegram_application.bot,
         logger=get_logger("app.download_queue"),
+        task_message_registry=task_message_registry,
     )
     upload_worker = UploadWorker(
         repository=repository,
         logger=get_logger("app.upload_worker"),
         uploader=GoogleDriveUploader(drive_service) if drive_service is not None else None,
         notification_bot=telegram_application.bot,
+        task_message_registry=task_message_registry,
     )
     startup_recovery_summary = await run_startup_recovery(
         download_queue=download_queue,

@@ -14,6 +14,7 @@ from app.download_manager import DownloadManager
 from app.exceptions import DownloadError
 from app.models import DownloadResult, FileMetadata, TelegramFileType
 from app.progress import ProgressSnapshot, format_bytes, format_duration
+from app.task_messages import ActiveTaskMessageRegistry, TaskMessageKey
 from app.ui import TelegramMessage, progress_card
 
 
@@ -69,6 +70,7 @@ class DownloadQueue:
         progress_interval_seconds: float = constants.DOWNLOAD_PROGRESS_UPDATE_SECONDS,
         retry_backoff_base_seconds: float = constants.DOWNLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.DOWNLOAD_RETRY_MAX_DELAY_SECONDS,
+        task_message_registry: ActiveTaskMessageRegistry | None = None,
     ) -> None:
         self._repository = repository
         self._download_manager = download_manager
@@ -78,6 +80,7 @@ class DownloadQueue:
         self._progress_interval_seconds = progress_interval_seconds
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
+        self._task_message_registry = task_message_registry
         self._queue: asyncio.Queue[DownloadJob] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._jobs: dict[int, DownloadJob] = {}
@@ -273,11 +276,13 @@ class DownloadQueue:
                     job.file_record_id,
                     job.attempts,
                 )
+                self._unregister_task_message(job)
                 await self._safe_edit_message(
                     chat_id=job.chat_id,
                     message_id=job.status_message_id,
                     text="Download cancelled.",
                 )
+                await self._promote_latest_active_message(job.chat_id)
                 return
 
             job.attempts += 1
@@ -307,11 +312,13 @@ class DownloadQueue:
                         bytes_downloaded=snapshot.current,
                         total_bytes=snapshot.total,
                     )
+                    message = _download_progress_message(job, snapshot)
                     await self._safe_edit_message(
                         chat_id=job.chat_id,
                         message_id=job.status_message_id,
-                        message=_download_progress_message(job, snapshot),
+                        message=message,
                     )
+                    self._update_task_message(job, message)
                     last_flushed = snapshot
 
             progress_task: asyncio.Task[None] | None = None
@@ -324,11 +331,13 @@ class DownloadQueue:
                         "attempt": job.attempts,
                     },
                 )
+                started_message = _download_started_message(job)
                 await self._safe_edit_message(
                     chat_id=job.chat_id,
                     message_id=job.status_message_id,
-                    message=_download_started_message(job),
+                    message=started_message,
                 )
+                self._register_task_message(job, started_message)
                 progress_task = asyncio.create_task(
                     flush_progress(),
                     name=f"download-progress-{job.file_record_id}",
@@ -361,11 +370,13 @@ class DownloadQueue:
                         "attempt": job.attempts,
                     },
                 )
+                self._unregister_task_message(job)
                 await self._safe_delete_message(
                     chat_id=job.chat_id,
                     message_id=job.status_message_id,
                 )
                 await self._send_rename_prompt(job, result.filename)
+                await self._promote_latest_active_message(job.chat_id)
                 return
             except asyncio.CancelledError:
                 job.active_task = None
@@ -377,11 +388,13 @@ class DownloadQueue:
                     job.file_record_id,
                     job.attempts,
                 )
+                self._unregister_task_message(job)
                 await self._safe_edit_message(
                     chat_id=job.chat_id,
                     message_id=job.status_message_id,
                     text="Download cancelled.",
                 )
+                await self._promote_latest_active_message(job.chat_id)
                 self._logger.info(
                     "download cancelled",
                     extra={
@@ -400,11 +413,13 @@ class DownloadQueue:
                         job.file_record_id,
                         job.attempts,
                     )
+                    self._unregister_task_message(job)
                     await self._safe_edit_message(
                         chat_id=job.chat_id,
                         message_id=job.status_message_id,
                         text="Download cancelled.",
                     )
+                    await self._promote_latest_active_message(job.chat_id)
                     self._logger.info(
                         "download cancelled",
                         extra={
@@ -431,11 +446,13 @@ class DownloadQueue:
                         job.attempts,
                     )
                     self._failed_since_startup += 1
+                    self._unregister_task_message(job)
                     await self._safe_edit_message(
                         chat_id=job.chat_id,
                         message_id=job.status_message_id,
                         text=f"Download failed: {exc}",
                     )
+                    await self._promote_latest_active_message(job.chat_id)
                     return
                 self._logger.info(
                     "retrying download",
@@ -533,9 +550,52 @@ class DownloadQueue:
                 extra={"event": "progress_delete_failed"},
             )
 
+    def _register_task_message(self, job: DownloadJob, message: TelegramMessage) -> None:
+        if self._task_message_registry is None:
+            return
+
+        def replace_message_id(message_id: int) -> None:
+            job.status_message_id = message_id
+            self._repository.update_download_status_message(
+                job.file_record_id,
+                status_chat_id=job.chat_id,
+                status_message_id=message_id,
+            )
+
+        self._task_message_registry.register(
+            key=_download_task_message_key(job.file_record_id),
+            chat_id=job.chat_id,
+            message_id=job.status_message_id,
+            message=message,
+            replace_message_id=replace_message_id,
+        )
+
+    def _update_task_message(self, job: DownloadJob, message: TelegramMessage) -> None:
+        if self._task_message_registry is None:
+            return
+        self._task_message_registry.update(_download_task_message_key(job.file_record_id), message)
+
+    def _unregister_task_message(self, job: DownloadJob) -> None:
+        if self._task_message_registry is None:
+            return
+        self._task_message_registry.unregister(_download_task_message_key(job.file_record_id))
+
+    async def _promote_latest_active_message(self, chat_id: int) -> None:
+        if self._task_message_registry is None:
+            return
+        await self._task_message_registry.promote_latest_active(
+            chat_id=chat_id,
+            bot=self._bot,
+            logger=self._logger,
+        )
+
 
 def _rename_callback(action: str, file_record_id: int) -> str:
     return f"{constants.RENAME_CALLBACK_PREFIX}:{action}:{file_record_id}"
+
+
+def _download_task_message_key(file_record_id: int) -> TaskMessageKey:
+    return ("download", file_record_id)
 
 
 def _job_filename(job: DownloadJob) -> str:

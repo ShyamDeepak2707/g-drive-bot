@@ -100,6 +100,7 @@ class FakeNotificationBot:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.messages: list[dict[str, object]] = []
+        self.deleted_messages: list[tuple[int, int]] = []
         self.next_message_id = 1000
 
     async def send_message(
@@ -123,6 +124,12 @@ class FakeNotificationBot:
             }
         )
         return FakeSentMessage(message_id)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> object:
+        if self.fail:
+            raise RuntimeError("Telegram delete failed")
+        self.deleted_messages.append((chat_id, message_id))
+        return object()
 
     async def edit_message_text(
         self,

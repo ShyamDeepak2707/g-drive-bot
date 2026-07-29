@@ -17,6 +17,7 @@ from app import constants
 from app.database import DatabaseRepository, FileRecord
 from app.job_state import InvalidJobStateTransition, JobState, should_start_upload
 from app.progress import ProgressSnapshot, format_bytes, format_duration
+from app.task_messages import ActiveTaskMessageRegistry, TaskMessageKey
 from app.ui.messages import TelegramMessage, error_card, progress_card, warning_card
 
 UploadProgressCallback = Callable[[ProgressSnapshot], None]
@@ -111,6 +112,8 @@ class UploadNotificationBot(Protocol):
         disable_web_page_preview: bool | None = None,
     ) -> object: ...
 
+    async def delete_message(self, chat_id: int, message_id: int) -> object: ...
+
 
 class GoogleDriveUploader:
     def __init__(self, service: Any) -> None:
@@ -188,7 +191,7 @@ class _UploadProgressState:
     latest: ProgressSnapshot | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class _UploadStatusTarget:
     chat_id: int
     message_id: int
@@ -206,6 +209,7 @@ class UploadWorker:
         retry_limit: int = constants.UPLOAD_RETRY_LIMIT,
         retry_backoff_base_seconds: float = constants.UPLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.UPLOAD_RETRY_MAX_DELAY_SECONDS,
+        task_message_registry: ActiveTaskMessageRegistry | None = None,
     ) -> None:
         self._repository = repository
         self._logger = logger
@@ -216,6 +220,7 @@ class UploadWorker:
         self._retry_limit = retry_limit
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
+        self._task_message_registry = task_message_registry
         self._current_file_record: FileRecord | None = None
         self._current_progress: ProgressSnapshot | None = None
         self._cancelled_file_ids: set[int] = set()
@@ -517,18 +522,25 @@ class UploadWorker:
                 progress_callback,
             )
             if self._is_cancel_requested(updated.id):
-                await _stop_progress_task(progress_task)
+                upload_target = await _stop_progress_task(progress_task)
+                if upload_target is not None:
+                    self._unregister_task_message(updated.id)
                 self._mark_upload_cancelled(updated.id, source="post_upload")
+                await self._promote_latest_active_message(upload_target)
                 return
             self._verify_upload(uploaded_file, upload_input.expected_size, updated.id)
             upload_target = await _stop_progress_task(progress_task)
             progress_task = None
         except Exception as exc:
-            await _stop_progress_task(progress_task)
+            upload_target = await _stop_progress_task(progress_task)
+            if upload_target is not None:
+                self._unregister_task_message(updated.id)
             if self._is_cancel_requested(updated.id):
                 self._mark_upload_cancelled(updated.id, source="upload_exception")
+                await self._promote_latest_active_message(upload_target)
                 return
             await self._handle_upload_failure(updated, exc)
+            await self._promote_latest_active_message(upload_target)
             return
 
         uploaded = self._repository.transition_file_state(
@@ -556,12 +568,15 @@ class UploadWorker:
                 finalized=finalized,
             )
             if upload_target is not None:
+                self._unregister_task_message(updated.id)
                 await self._safe_edit_message(
                     upload_target,
                     complete_message,
                 )
+                await self._promote_latest_active_message(upload_target)
             else:
                 await self._send_upload_completion_message(updated, complete_message)
+                await self._promote_latest_active_message_for_file(updated)
 
     def _recover_uploaded_after_restart(self, file_record: FileRecord) -> bool:
         if file_record.google_drive_file_id is None:
@@ -916,10 +931,16 @@ class UploadWorker:
                 },
             )
             return None
-        return _UploadStatusTarget(
+        target = _UploadStatusTarget(
             chat_id=download.status_chat_id,
             message_id=message_id,
         )
+        self._register_task_message(
+            file_record_id=file_record.id,
+            target=target,
+            message=message,
+        )
+        return target
 
     async def _send_upload_completion_message(
         self,
@@ -1022,6 +1043,8 @@ class UploadWorker:
                 parse_mode=message.parse_mode,
                 disable_web_page_preview=message.disable_web_page_preview,
             )
+            if self._current_file_record is not None:
+                self._update_task_message(self._current_file_record.id, message)
         except Exception as exc:
             self._logger.warning(
                 "failed to edit upload progress message",
@@ -1038,6 +1061,58 @@ class UploadWorker:
                     "error_type": type(exc).__name__,
                 },
             )
+
+    def _register_task_message(
+        self,
+        *,
+        file_record_id: int,
+        target: _UploadStatusTarget,
+        message: TelegramMessage,
+    ) -> None:
+        if self._task_message_registry is None:
+            return
+
+        def replace_message_id(message_id: int) -> None:
+            target.message_id = message_id
+
+        self._task_message_registry.register(
+            key=_upload_task_message_key(file_record_id),
+            chat_id=target.chat_id,
+            message_id=target.message_id,
+            message=message,
+            replace_message_id=replace_message_id,
+        )
+
+    def _update_task_message(self, file_record_id: int, message: TelegramMessage) -> None:
+        if self._task_message_registry is None:
+            return
+        self._task_message_registry.update(_upload_task_message_key(file_record_id), message)
+
+    def _unregister_task_message(self, file_record_id: int) -> None:
+        if self._task_message_registry is None:
+            return
+        self._task_message_registry.unregister(_upload_task_message_key(file_record_id))
+
+    async def _promote_latest_active_message(self, target: _UploadStatusTarget | None) -> None:
+        if self._task_message_registry is None or self._notification_bot is None or target is None:
+            return
+        await self._task_message_registry.promote_latest_active(
+            chat_id=target.chat_id,
+            bot=self._notification_bot,
+            logger=self._logger,
+        )
+
+    async def _promote_latest_active_message_for_file(self, file_record: FileRecord) -> None:
+        if self._task_message_registry is None or self._notification_bot is None:
+            return
+        download = self._repository.get_download(file_record.id)
+        if download is None or download.status_chat_id is None:
+            return
+        await self._task_message_registry.promote_latest_active(
+            chat_id=download.status_chat_id,
+            bot=self._notification_bot,
+            logger=self._logger,
+        )
 
     async def _notify_upload_failure(
         self,
@@ -1183,6 +1258,10 @@ def _upload_speed(snapshot: ProgressSnapshot) -> str:
     if snapshot.speed_bytes_per_second is None:
         return "Calculating"
     return f"{format_bytes(int(snapshot.speed_bytes_per_second))}/s"
+
+
+def _upload_task_message_key(file_record_id: int) -> TaskMessageKey:
+    return ("upload", file_record_id)
 
 
 def _upload_eta(snapshot: ProgressSnapshot) -> str | None:
