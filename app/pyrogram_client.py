@@ -78,3 +78,58 @@ def create_pyrogram_client(settings: Settings) -> PyrogramSessionManager | None:
     )
     logger.info("Pyrogram user session initialized but not started")
     return PyrogramSessionManager(client=client, logger=logger)
+
+
+class PyrogramBotSessionManager:
+    def __init__(self, client: Any, logger: logging.Logger) -> None:
+        self.client = client
+        self._logger = logger
+        self._running = False
+
+    async def start(self) -> None:
+        if self._running or self.client.is_connected:
+            self._validate_bot_session()
+            self._running = True
+            return
+        await self.client.start()
+        self._validate_bot_session()
+        self._running = True
+        self._logger.info("pyrogram bot session started", extra={"event": "pyrogram_bot_started"})
+
+    async def stop(self) -> None:
+        if not self._running and not self.client.is_connected:
+            return
+        await self.client.stop()
+        self._running = False
+        self._logger.info("pyrogram bot session stopped", extra={"event": "pyrogram_bot_stopped"})
+
+    def is_running(self) -> bool:
+        return self._running or bool(self.client.is_connected)
+
+    def _validate_bot_session(self) -> None:
+        me = getattr(self.client, "me", None)
+        if not getattr(me, "is_bot", False):
+            raise ConfigurationError(
+                "Pyrogram bot downloads require a bot session. Verify TELEGRAM_BOT_TOKEN."
+            )
+
+
+def create_pyrogram_bot_client(settings: Settings) -> PyrogramBotSessionManager | None:
+    if settings.pyrogram_api_id is None or settings.pyrogram_api_hash is None:
+        logger.info("Pyrogram credentials are incomplete; bot media downloads disabled")
+        return None
+
+    from pyrogram import Client
+
+    settings.pyrogram_workdir.mkdir(parents=True, exist_ok=True)
+    client = Client(
+        name=f"{settings.pyrogram_session_name}_bot",
+        api_id=settings.pyrogram_api_id,
+        api_hash=settings.pyrogram_api_hash,
+        bot_token=settings.telegram_bot_token,
+        no_updates=True,
+        max_concurrent_transmissions=settings.pyrogram_max_concurrent_transmissions,
+        workdir=str(settings.pyrogram_workdir),
+    )
+    logger.info("Pyrogram bot session initialized but not started")
+    return PyrogramBotSessionManager(client=client, logger=logger)

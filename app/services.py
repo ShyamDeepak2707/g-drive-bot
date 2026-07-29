@@ -21,7 +21,7 @@ from app.task_manager import AsyncTaskManager
 from app.upload_worker import UploadWorker
 
 if TYPE_CHECKING:
-    from app.pyrogram_client import PyrogramSessionManager
+    from app.pyrogram_client import PyrogramBotSessionManager, PyrogramSessionManager
     from app.render_health import RenderHealthServer
 
 T = TypeVar("T")
@@ -49,6 +49,7 @@ class ApplicationContainer:
     repository: DatabaseRepository
     task_manager: AsyncTaskManager
     pyrogram_client: PyrogramSessionManager | None = None
+    pyrogram_bot_client: PyrogramBotSessionManager | None = None
     download_manager: DownloadManager | None = None
     download_queue: DownloadQueue | None = None
     upload_worker: UploadWorker | None = None
@@ -71,6 +72,8 @@ class ApplicationContainer:
         self.registry.set("task_manager", self.task_manager)
         if self.pyrogram_client is not None:
             self.registry.set("pyrogram_client", self.pyrogram_client)
+        if self.pyrogram_bot_client is not None:
+            self.registry.set("pyrogram_bot_client", self.pyrogram_bot_client)
         if self.download_manager is not None:
             self.registry.set("download_manager", self.download_manager)
         if self.download_queue is not None:

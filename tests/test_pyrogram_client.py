@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.pyrogram_client import PyrogramSessionManager
+from app.pyrogram_client import PyrogramBotSessionManager, PyrogramSessionManager
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, *, is_bot: bool = False) -> None:
         self.is_connected = False
-        self.me = object()
+        self.me = type("FakeMe", (), {"is_bot": is_bot})()
         self.start_calls = 0
         self.stop_calls = 0
         self.get_dialogs_calls = 0
@@ -41,4 +41,20 @@ def test_pyrogram_session_warms_peer_cache_once() -> None:
 
     assert client.start_calls == 1
     assert client.get_dialogs_calls == 1
+    assert client.stop_calls == 1
+
+
+def test_pyrogram_bot_session_starts_without_warming_peer_cache() -> None:
+    client = FakeClient(is_bot=True)
+    manager = PyrogramBotSessionManager(client=client, logger=logging.getLogger("test"))
+
+    async def run() -> None:
+        await manager.start()
+        await manager.start()
+        await manager.stop()
+
+    asyncio.run(run())
+
+    assert client.start_calls == 1
+    assert client.get_dialogs_calls == 0
     assert client.stop_calls == 1

@@ -17,7 +17,12 @@ from app.drive.browser import DriveFolderBrowser
 from app.exceptions import StartupValidationError, TelegramError
 from app.health import HealthService
 from app.logging_config import configure_logging, get_logger
-from app.pyrogram_client import PyrogramSessionManager, create_pyrogram_client
+from app.pyrogram_client import (
+    PyrogramBotSessionManager,
+    PyrogramSessionManager,
+    create_pyrogram_bot_client,
+    create_pyrogram_client,
+)
 from app.render_health import RenderHealthServer, start_render_health_server_from_env
 from app.services import ApplicationContainer
 from app.shutdown_control import ShutdownController
@@ -62,8 +67,10 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
     task_manager = AsyncTaskManager(get_logger("app.task_manager"))
 
     pyrogram_client = None
+    pyrogram_bot_client = None
     try:
         pyrogram_client = create_pyrogram_client(settings)
+        pyrogram_bot_client = create_pyrogram_bot_client(settings)
         drive_service = get_drive_service(settings)
         telegram_application = create_application(settings)
         await validate_startup_configuration(
@@ -77,6 +84,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
     except Exception:
         logger.exception("startup validation failed", extra={"event": "startup_validation_failed"})
         await _stop_pyrogram(pyrogram_client)
+        await _stop_pyrogram_bot(pyrogram_bot_client)
         await _stop_render_health_server(render_health_server)
         database.close()
         raise
@@ -91,6 +99,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
     download_manager = DownloadManager(
         bot=telegram_application.bot,
         pyrogram_session=pyrogram_client,
+        pyrogram_bot_session=pyrogram_bot_client,
         download_dir=settings.downloads_dir,
         temp_dir=settings.temp_dir,
         logger=get_logger("app.download_manager"),
@@ -160,6 +169,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
         repository=repository,
         task_manager=task_manager,
         pyrogram_client=pyrogram_client,
+        pyrogram_bot_client=pyrogram_bot_client,
         download_manager=download_manager,
         download_queue=download_queue,
         upload_worker=upload_worker,
@@ -201,6 +211,7 @@ async def shutdown(container: ApplicationContainer | None) -> None:
     await _stop_upload_worker(container.upload_worker)
     await _stop_telegram(container.telegram_application)
     await _stop_pyrogram(container.pyrogram_client)
+    await _stop_pyrogram_bot(container.pyrogram_bot_client)
     await _stop_render_health_server(container.render_health_server)
     await container.task_manager.shutdown()
     container.database.close()
@@ -253,6 +264,13 @@ async def _stop_upload_worker(worker: UploadWorker | None) -> None:
 
 
 async def _stop_pyrogram(client: PyrogramSessionManager | None) -> None:
+    if client is None:
+        return
+    if client.is_running():
+        await client.stop()
+
+
+async def _stop_pyrogram_bot(client: PyrogramBotSessionManager | None) -> None:
     if client is None:
         return
     if client.is_running():

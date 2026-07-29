@@ -274,7 +274,7 @@ def test_download_manager_logs_bot_api_fallback_reason(
         if getattr(record, "event", None) == "download_source_selected"
     )
     assert decision.__dict__["detected_download_source"] == "bot_api_file_id"
-    assert decision.__dict__["bot_api_fallback_reason"] == "metadata_has_no_forward_origin_ids"
+    assert decision.__dict__["bot_api_fallback_reason"] == "pyrogram_bot_session_not_configured"
     assert decision.__dict__["metadata_chat_id"] == 2
     assert decision.__dict__["metadata_message_id"] == 1
 
@@ -307,212 +307,81 @@ def test_download_manager_uses_forward_origin_with_pyrogram(tmp_path: Path) -> N
     assert result.path.read_bytes() == b"hello"
 
 
-def test_download_manager_uses_pyrogram_bot_dialog_without_forward_origin(
+def test_download_manager_uses_pyrogram_bot_message_without_forward_origin(
     tmp_path: Path,
 ) -> None:
     bot = FakeBotApiClient()
-    session = FakePyrogramSession()
+    bot_session = FakePyrogramSession()
     manager = DownloadManager(
         bot=bot,
-        pyrogram_session=session,
+        pyrogram_session=None,
         download_dir=tmp_path / "downloads",
         temp_dir=tmp_path / "tmp",
         logger=logging.getLogger("test"),
+        pyrogram_bot_session=bot_session,
     )
 
     result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata(message_id=212)))
 
-    assert session.started
-    assert bot.get_me_calls == 1
-    assert session.client.get_messages_calls == 1
-    assert session.client.requested_chat_id == "test_bot"
-    assert session.client.requested_message_id == 212
-    assert session.client.downloaded_message is not None
+    assert bot_session.started
+    assert bot.get_me_calls == 0
+    assert bot_session.client.get_messages_calls == 1
+    assert bot_session.client.requested_chat_id == 2
+    assert bot_session.client.requested_message_id == 212
+    assert bot_session.client.downloaded_message is not None
     assert bot.requested_file_id is None
     assert result.path.read_bytes() == b"hello"
 
 
-def test_download_manager_allows_bot_dialog_peer_id_mismatch(
+def test_download_manager_logs_pyrogram_bot_message_source(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     bot = FakeBotApiClient()
-    session = FakePyrogramSession(FakePyrogramClient(resolved_chat_id=1846101730))
+    bot_session = FakePyrogramSession()
     manager = DownloadManager(
         bot=bot,
-        pyrogram_session=session,
+        pyrogram_session=None,
         download_dir=tmp_path / "downloads",
         temp_dir=tmp_path / "tmp",
         logger=logging.getLogger("test"),
+        pyrogram_bot_session=bot_session,
     )
 
     with caplog.at_level(logging.INFO, logger="test"):
         result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata(message_id=214)))
 
-    mismatch = next(
+    decision = next(
         record
         for record in caplog.records
-        if getattr(record, "event", None) == "bot_dialog_peer_id_mismatch"
+        if getattr(record, "event", None) == "download_source_selected"
     )
-    assert mismatch.__dict__["bot_dialog_peer_id"] == 999
-    assert mismatch.__dict__["resolved_chat_id"] == 1846101730
-    assert session.client.downloaded_message is not None
+    fetched = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "pyrogram_bot_message_fetched"
+    )
+    assert decision.__dict__["detected_download_source"] == "pyrogram_bot_message"
+    assert decision.__dict__["bot_api_fallback_reason"] is None
+    assert fetched.__dict__["requested_chat_id"] == 2
+    assert fetched.__dict__["requested_message_id"] == 214
+    assert bot_session.client.downloaded_message is not None
     assert bot.requested_file_id is None
     assert result.path.read_bytes() == b"hello"
 
 
-def test_download_manager_searches_bot_dialog_when_direct_message_size_differs(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+def test_download_manager_falls_back_to_bot_api_when_pyrogram_bot_message_has_no_media(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    matching_message = FakePyrogramMessage(
-        message_id=777,
-        chat_id=1846101730,
-        document_size=5,
-    )
-    client = FakePyrogramClient(
-        resolved_chat_id=1846101730,
-        document_size=303 * 1024 * 1024,
-        search_messages=[matching_message],
-    )
     bot = FakeBotApiClient()
-    session = FakePyrogramSession(client)
+    bot_session = FakePyrogramSession(FakePyrogramClient(has_media=False))
     manager = DownloadManager(
         bot=bot,
-        pyrogram_session=session,
+        pyrogram_session=None,
         download_dir=tmp_path / "downloads",
         temp_dir=tmp_path / "tmp",
         logger=logging.getLogger("test"),
-    )
-
-    with caplog.at_level(logging.INFO, logger="test"):
-        result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata(message_id=214)))
-
-    mismatch = next(
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "bot_dialog_direct_message_mismatch"
-    )
-    resolved = next(
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "bot_dialog_matching_message_resolved"
-    )
-    assert mismatch.__dict__["resolved_size"] == 303 * 1024 * 1024
-    assert resolved.__dict__["resolved_message_id"] == 777
-    assert client.search_messages_calls == 1
-    assert client.downloaded_message is matching_message
-    assert bot.requested_file_id is None
-    assert result.path.read_bytes() == b"hello"
-
-
-def test_download_manager_searches_bot_dialog_when_direct_message_unique_id_differs(
-    tmp_path: Path,
-) -> None:
-    matching_message = FakePyrogramMessage(
-        message_id=778,
-        chat_id=1846101730,
-        document_size=5,
-        document_unique_id="expected-unique-id",
-    )
-    client = FakePyrogramClient(
-        resolved_chat_id=1846101730,
-        document_size=5,
-        document_unique_id="wrong-unique-id",
-        search_messages=[matching_message],
-    )
-    bot = FakeBotApiClient()
-    session = FakePyrogramSession(client)
-    manager = DownloadManager(
-        bot=bot,
-        pyrogram_session=session,
-        download_dir=tmp_path / "downloads",
-        temp_dir=tmp_path / "tmp",
-        logger=logging.getLogger("test"),
-    )
-
-    result = asyncio.run(
-        manager.download(
-            file_record_id=1,
-            metadata=_metadata(
-                message_id=214,
-                telegram_file_unique_id="expected-unique-id",
-            ),
-        )
-    )
-
-    assert client.search_messages_calls == 1
-    assert client.downloaded_message is matching_message
-    assert bot.requested_file_id is None
-    assert result.path.read_bytes() == b"hello"
-
-
-def test_download_manager_searches_bot_dialog_when_direct_message_has_no_media(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    matching_message = FakePyrogramMessage(
-        message_id=779,
-        chat_id=1846101730,
-        document_size=5,
-        document_unique_id="expected-unique-id",
-    )
-    client = FakePyrogramClient(
-        has_media=False,
-        resolved_chat_id=1846101730,
-        search_messages=[matching_message],
-    )
-    bot = FakeBotApiClient()
-    session = FakePyrogramSession(client)
-    manager = DownloadManager(
-        bot=bot,
-        pyrogram_session=session,
-        download_dir=tmp_path / "downloads",
-        temp_dir=tmp_path / "tmp",
-        logger=logging.getLogger("test"),
-    )
-
-    with caplog.at_level(logging.INFO, logger="test"):
-        result = asyncio.run(
-            manager.download(
-                file_record_id=1,
-                metadata=_metadata(
-                    message_id=214,
-                    telegram_file_unique_id="expected-unique-id",
-                ),
-            )
-        )
-
-    non_media = next(
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "bot_dialog_direct_message_without_expected_media"
-    )
-    resolved = next(
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "bot_dialog_matching_message_resolved"
-    )
-    assert non_media.__dict__["expected_file_type"] == "document"
-    assert resolved.__dict__["resolved_message_id"] == 779
-    assert client.search_messages_calls == 1
-    assert client.downloaded_message is matching_message
-    assert bot.requested_file_id is None
-    assert result.path.read_bytes() == b"hello"
-
-
-def test_download_manager_falls_back_to_bot_api_when_bot_dialog_has_no_media(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    bot = FakeBotApiClient()
-    session = FakePyrogramSession(FakePyrogramClient(has_media=False))
-    manager = DownloadManager(
-        bot=bot,
-        pyrogram_session=session,
-        download_dir=tmp_path / "downloads",
-        temp_dir=tmp_path / "tmp",
-        logger=logging.getLogger("test"),
+        pyrogram_bot_session=bot_session,
     )
 
     with caplog.at_level(logging.WARNING, logger="test"):
@@ -521,9 +390,9 @@ def test_download_manager_falls_back_to_bot_api_when_bot_dialog_has_no_media(
     fallback = next(
         record
         for record in caplog.records
-        if getattr(record, "event", None) == "pyrogram_bot_dialog_fallback"
+        if getattr(record, "event", None) == "pyrogram_bot_message_fallback"
     )
-    assert "could not locate the matching media" in fallback.__dict__["error"]
+    assert "does not contain the expected document media" in fallback.__dict__["error"]
     assert bot.requested_file_id == "bot-api-file-id"
     assert result.path.read_bytes() == b"hello"
 

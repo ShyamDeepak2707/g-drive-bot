@@ -92,9 +92,11 @@ class DownloadManager:
         download_dir: Path,
         temp_dir: Path,
         logger: logging.Logger,
+        pyrogram_bot_session: PyrogramSession | None = None,
     ) -> None:
         self._bot = bot
         self._pyrogram_session = pyrogram_session
+        self._pyrogram_bot_session = pyrogram_bot_session
         self._download_dir = ensure_directory(download_dir)
         self._temp_dir = ensure_directory(temp_dir)
         self._logger = logger
@@ -116,8 +118,8 @@ class DownloadManager:
             extra={
                 "event": "download_source_selected",
                 "file_record_id": file_record_id,
-                "detected_download_source": _download_source(metadata),
-                "bot_api_fallback_reason": _metadata_bot_api_fallback_reason(metadata),
+                "detected_download_source": self._selected_download_source(metadata),
+                "bot_api_fallback_reason": self._bot_api_fallback_reason(metadata),
                 "metadata_chat_id": metadata.chat_id,
                 "metadata_message_id": metadata.message_id,
                 "forward_origin_chat_id": metadata.forward_origin_chat_id,
@@ -140,9 +142,9 @@ class DownloadManager:
                     started_at=started_at,
                     progress_callback=progress_callback,
                 )
-            elif self._pyrogram_session is not None:
+            elif self._pyrogram_bot_session is not None:
                 try:
-                    result = await self._download_via_bot_dialog(
+                    result = await self._download_via_pyrogram_bot_message(
                         file_record_id=file_record_id,
                         metadata=metadata,
                         final_path=final_path,
@@ -152,9 +154,9 @@ class DownloadManager:
                     )
                 except DownloadError as exc:
                     self._logger.warning(
-                        "pyrogram bot dialog download unavailable; falling back to Bot API",
+                        "pyrogram bot message download unavailable; falling back to Bot API",
                         extra={
-                            "event": "pyrogram_bot_dialog_fallback",
+                            "event": "pyrogram_bot_message_fallback",
                             "file_record_id": file_record_id,
                             "metadata_chat_id": metadata.chat_id,
                             "metadata_message_id": metadata.message_id,
@@ -361,6 +363,154 @@ class DownloadManager:
             extra={
                 "event": "download_completed",
                 "download_source": "pyrogram_forward_origin",
+                "file_record_id": file_record_id,
+                "path": str(final_path),
+                "size": result.size,
+            },
+        )
+        return result
+
+    async def _download_via_pyrogram_bot_message(
+        self,
+        file_record_id: int,
+        metadata: FileMetadata,
+        final_path: Path,
+        temp_path: Path,
+        started_at: float,
+        progress_callback: ProgressCallback | None,
+    ) -> DownloadResult:
+        if self._pyrogram_bot_session is None:
+            raise DownloadError("Pyrogram bot session is not configured.")
+
+        await self._pyrogram_bot_session.start()
+        client = cast(PyrogramDownloadClient, self._pyrogram_bot_session.client)
+        await self._log_pyrogram_account(
+            client=client,
+            file_record_id=file_record_id,
+            download_source="pyrogram_bot_message",
+        )
+        self._logger.info(
+            "download started",
+            extra={
+                "event": "download_started",
+                "download_source": "pyrogram_bot_message",
+                "file_record_id": file_record_id,
+                "bot_api_chat_id": metadata.chat_id,
+                "bot_api_message_id": metadata.message_id,
+                "file_type": metadata.file_type.value,
+            },
+        )
+        try:
+            message = await client.get_messages(
+                chat_id=metadata.chat_id,
+                message_ids=metadata.message_id,
+            )
+        except Exception as exc:
+            raise DownloadError("Pyrogram bot could not fetch the incoming media message.") from exc
+
+        detected_media_type = _detect_media_type(message)
+        self._logger.info(
+            "pyrogram bot source message fetched",
+            extra={
+                "event": "pyrogram_bot_message_fetched",
+                "download_source": "pyrogram_bot_message",
+                "file_record_id": file_record_id,
+                "requested_chat_id": metadata.chat_id,
+                "requested_message_id": metadata.message_id,
+                "resolved_message_id": getattr(message, "id", None),
+                "resolved_chat_id": getattr(getattr(message, "chat", None), "id", None),
+                "resolved_chat_type": getattr(getattr(message, "chat", None), "type", None),
+                "detected_media_type": detected_media_type,
+                "document": bool(getattr(message, "document", None)),
+                "video": bool(getattr(message, "video", None)),
+                "audio": bool(getattr(message, "audio", None)),
+                "photo": bool(getattr(message, "photo", None)),
+                "animation": bool(getattr(message, "animation", None)),
+                "voice": bool(getattr(message, "voice", None)),
+                "text": getattr(message, "text", None),
+                "caption": getattr(message, "caption", None),
+            },
+        )
+        if getattr(message, metadata.file_type.value, None) is None:
+            raise DownloadError(
+                "Pyrogram bot message does not contain the expected "
+                f"{metadata.file_type.value} media."
+            )
+
+        async def progress(current: int, total: int) -> None:
+            if progress_callback is None:
+                return
+            await progress_callback(_progress_snapshot(current, total, metadata.size, started_at))
+
+        media = getattr(message, metadata.file_type.value)
+        expected_size = getattr(media, "file_size", None)
+        _verify_remote_media_size(
+            expected_size=metadata.size,
+            resolved_size=expected_size,
+            file_record_id=file_record_id,
+            download_source="pyrogram_bot_message",
+            logger=self._logger,
+        )
+        self._logger.info(
+            "download_begin",
+            extra={
+                "event": "download_begin",
+                "download_source": "pyrogram_bot_message",
+                "file_record_id": file_record_id,
+                "file_name": getattr(media, "file_name", None),
+                "file_size": expected_size,
+                "mime_type": getattr(media, "mime_type", None),
+                "resolved_file_unique_id_present": _message_media_unique_id(message, metadata)
+                is not None,
+                "telegram_file_unique_id_present": metadata.telegram_file_unique_id is not None,
+            },
+        )
+        download_started_at = time.perf_counter()
+        downloaded_path = await client.download_media(
+            message,
+            file_name=str(temp_path),
+            progress=progress,
+        )
+        elapsed = time.perf_counter() - download_started_at
+        if downloaded_path is None:
+            raise DownloadError("Pyrogram did not return a downloaded file path.")
+        source_path = Path(downloaded_path)
+        actual_size = source_path.stat().st_size if source_path.exists() else None
+        self._logger.info(
+            "download_performance",
+            extra={
+                "event": "download_performance",
+                "download_source": "pyrogram_bot_message",
+                "file_record_id": file_record_id,
+                "seconds": elapsed,
+                "size": actual_size,
+                "average_mbps": _average_mbps(actual_size, elapsed),
+            },
+        )
+        self._logger.info(
+            "download_complete",
+            extra={
+                "event": "download_complete",
+                "download_source": "pyrogram_bot_message",
+                "file_record_id": file_record_id,
+                "expected_size": expected_size,
+                "actual_size": actual_size,
+                "match": actual_size == expected_size,
+            },
+        )
+        _verify_download_size(
+            source_path=source_path,
+            expected_size=expected_size if expected_size is not None else metadata.size,
+            file_record_id=file_record_id,
+            download_source="pyrogram_bot_message",
+            logger=self._logger,
+        )
+        result = self._finalize_download(file_record_id, metadata, source_path, final_path)
+        self._logger.info(
+            "download completed",
+            extra={
+                "event": "download_completed",
+                "download_source": "pyrogram_bot_message",
                 "file_record_id": file_record_id,
                 "path": str(final_path),
                 "size": result.size,
@@ -1138,6 +1288,25 @@ class DownloadManager:
     def _temp_path(self, final_path: Path) -> Path:
         return self._temp_dir / f"{final_path.name}.{uuid.uuid4().hex}.part"
 
+    def _selected_download_source(self, metadata: FileMetadata) -> str:
+        if (
+            metadata.forward_origin_chat_id is not None
+            and metadata.forward_origin_message_id is not None
+        ):
+            return "pyrogram_forward_origin"
+        if self._pyrogram_bot_session is not None:
+            return "pyrogram_bot_message"
+        return "bot_api_file_id"
+
+    def _bot_api_fallback_reason(self, metadata: FileMetadata) -> str | None:
+        if self._selected_download_source(metadata) != "bot_api_file_id":
+            return None
+        if metadata.forward_origin_chat_id is None and metadata.forward_origin_message_id is None:
+            return "pyrogram_bot_session_not_configured"
+        if metadata.forward_origin_chat_id is None:
+            return "metadata_missing_forward_origin_chat_id"
+        return "metadata_missing_forward_origin_message_id"
+
 
 def _cleanup_file(path: Path, logger: logging.Logger) -> None:
     with contextlib.suppress(OSError):
@@ -1345,7 +1514,7 @@ def _download_source(metadata: FileMetadata) -> str:
         and metadata.forward_origin_message_id is not None
     ):
         return "pyrogram_forward_origin"
-    return "bot_api_file_id"
+    return "pyrogram_bot_message"
 
 
 def _metadata_bot_api_fallback_reason(metadata: FileMetadata) -> str | None:
