@@ -420,7 +420,7 @@ class DownloadManager:
         self._logger.info(
             "bot-dialog get_messages returned message type",
             extra={
-                "event": "bot_dialog_get_messages_type",
+                "event": "get_messages_result_type",
                 "download_source": "pyrogram_bot_dialog",
                 "file_record_id": file_record_id,
                 "requested_message_id": metadata.message_id,
@@ -695,7 +695,7 @@ class DownloadManager:
             self._logger.warning(
                 "could not fetch Pyrogram bot dialog chat",
                 extra={
-                    "event": "bot_dialog_get_chat_diagnostic_failed",
+                    "event": "bot_dialog_chat_diagnostic_failed",
                     "download_source": "pyrogram_bot_dialog",
                     "file_record_id": file_record_id,
                     "bot_peer": bot_peer,
@@ -707,7 +707,7 @@ class DownloadManager:
             self._logger.info(
                 "Pyrogram bot dialog chat resolved",
                 extra={
-                    "event": "bot_dialog_get_chat_diagnostic",
+                    "event": "bot_dialog_chat_diagnostic",
                     "download_source": "pyrogram_bot_dialog",
                     "file_record_id": file_record_id,
                     "bot_peer": bot_peer,
@@ -746,7 +746,7 @@ class DownloadManager:
             self._logger.info(
                 "bot-dialog latest history message",
                 extra={
-                    "event": "bot_dialog_latest_history_message",
+                    "event": "bot_dialog_history_snapshot",
                     "download_source": "pyrogram_bot_dialog",
                     "file_record_id": file_record_id,
                     "bot_peer": bot_peer,
