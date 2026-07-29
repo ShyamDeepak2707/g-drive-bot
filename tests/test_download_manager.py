@@ -276,6 +276,35 @@ def test_download_manager_uses_pyrogram_bot_dialog_without_forward_origin(
     assert result.path.read_bytes() == b"hello"
 
 
+def test_download_manager_allows_bot_dialog_peer_id_mismatch(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot = FakeBotApiClient()
+    session = FakePyrogramSession(FakePyrogramClient(resolved_chat_id=1846101730))
+    manager = DownloadManager(
+        bot=bot,
+        pyrogram_session=session,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="test"):
+        result = asyncio.run(manager.download(file_record_id=1, metadata=_metadata(message_id=214)))
+
+    mismatch = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "bot_dialog_peer_id_mismatch"
+    )
+    assert mismatch.__dict__["bot_dialog_peer_id"] == 999
+    assert mismatch.__dict__["resolved_chat_id"] == 1846101730
+    assert session.client.downloaded_message is not None
+    assert bot.requested_file_id is None
+    assert result.path.read_bytes() == b"hello"
+
+
 def test_download_manager_falls_back_to_bot_api_when_bot_dialog_has_no_media(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

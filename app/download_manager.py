@@ -392,9 +392,19 @@ class DownloadManager:
         )
         resolved_chat_id = getattr(getattr(message, "chat", None), "id", None)
         if bot_peer_id is not None and resolved_chat_id != bot_peer_id:
-            raise DownloadError(
-                "Bot-dialog Telegram message resolved to a different chat "
-                f"({resolved_chat_id}) than the bot peer ({bot_peer_id})."
+            self._logger.info(
+                "bot-dialog resolved peer id differs from Bot API bot id",
+                extra={
+                    "event": "bot_dialog_peer_id_mismatch",
+                    "download_source": "pyrogram_bot_dialog",
+                    "file_record_id": file_record_id,
+                    "bot_dialog_peer": bot_peer,
+                    "bot_dialog_peer_id": bot_peer_id,
+                    "resolved_chat_id": resolved_chat_id,
+                    "requested_message_id": metadata.message_id,
+                    "resolved_message_id": getattr(message, "id", None),
+                    "detected_media_type": detected_media_type,
+                },
             )
         if getattr(message, metadata.file_type.value, None) is None:
             raise DownloadError(
