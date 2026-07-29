@@ -399,6 +399,15 @@ class DownloadManager:
 
         detected_media_type = _detect_media_type(message)
         self._logger.info(
+            "Fetched message: id=%s chat_id=%s document=%s video=%s audio=%s text=%r",
+            getattr(message, "id", None),
+            getattr(getattr(message, "chat", None), "id", None),
+            bool(getattr(message, "document", None)),
+            bool(getattr(message, "video", None)),
+            bool(getattr(message, "audio", None)),
+            getattr(message, "text", None),
+        )
+        self._logger.info(
             "bot-dialog source message fetched",
             extra={
                 "event": "bot_dialog_message_fetched",
