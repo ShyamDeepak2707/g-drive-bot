@@ -516,10 +516,44 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
         _get_logger(context).warning("media update missing message or user")
         return
 
+    _get_logger(context).info(
+        "incoming media update received",
+        extra={
+            "event": "incoming_media_update_trace",
+            "update_message_id": getattr(getattr(update, "message", None), "message_id", None),
+            "effective_message_id": message.message_id,
+            "effective_chat_id": getattr(update.effective_chat, "id", None),
+            "effective_user_id": user.id,
+            "message_chat_id": message.chat_id,
+            "has_document": message.document is not None,
+            "has_video": message.video is not None,
+            "has_audio": message.audio is not None,
+            "has_photo": bool(message.photo),
+            "has_animation": message.animation is not None,
+            "has_voice": message.voice is not None,
+        },
+    )
     metadata = _extract_file_metadata(message)
     if metadata is None:
         await message.reply_text("This file type is not supported yet.")
         return
+    _get_logger(context).info(
+        "media metadata message id assigned",
+        extra={
+            "event": "media_metadata_message_id_assigned",
+            "incoming_update_message_id": getattr(
+                getattr(update, "message", None), "message_id", None
+            ),
+            "effective_message_id": message.message_id,
+            "metadata_message_id": metadata.message_id,
+            "metadata_chat_id": metadata.chat_id,
+            "effective_chat_id": getattr(update.effective_chat, "id", None),
+            "effective_user_id": user.id,
+            "file_type": metadata.file_type.value,
+            "original_name": metadata.original_name,
+            "size": metadata.size,
+        },
+    )
     _get_logger(context).info(
         "incoming file download source diagnosed",
         extra=_incoming_file_download_diagnostics(message, metadata),
@@ -561,6 +595,22 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
         first_name=user.first_name,
     )
     file_record = repository.create_file_record(user_id=created_user.id, metadata=metadata)
+    _get_logger(context).info(
+        "media metadata persisted",
+        extra={
+            "event": "media_metadata_persisted",
+            "file_record_id": file_record.id,
+            "metadata_message_id": metadata.message_id,
+            "persisted_message_id": file_record.message_id,
+            "metadata_chat_id": metadata.chat_id,
+            "persisted_chat_id": file_record.chat_id,
+            "effective_chat_id": getattr(update.effective_chat, "id", None),
+            "effective_user_id": user.id,
+            "file_type": metadata.file_type.value,
+            "original_name": metadata.original_name,
+            "size": metadata.size,
+        },
+    )
 
     queue = _get_download_queue(context)
     if queue is None:

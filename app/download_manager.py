@@ -793,169 +793,57 @@ class DownloadManager:
         metadata: FileMetadata,
         file_record_id: int,
     ) -> object:
-        query = metadata.original_name or ""
-        messages_filter = _pyrogram_messages_filter(metadata.file_type.value)
-        searched = 0
-        total_media_scanned = 0
-        document_candidates = 0
-        video_candidates = 0
-        audio_candidates = 0
-
         self._logger.info(
-            "bot-dialog media search expected metadata",
+            "temporary raw bot-dialog history dump started",
             extra={
-                "event": "bot_dialog_search_expected_metadata",
+                "event": "bot_dialog_raw_history_dump_started",
                 "file_record_id": file_record_id,
                 "bot_peer": bot_peer,
-                "expected_file_name": metadata.original_name,
-                "expected_size": metadata.size,
-                "expected_file_unique_id": metadata.telegram_file_unique_id,
-                "file_type": metadata.file_type.value,
+                "limit": 10,
             },
         )
-
-        self._logger.info(
-            "Searching bot dialog history",
-            extra={
-                "event": "bot_dialog_search_started",
-                "file_record_id": file_record_id,
-                "strategy": "search_messages",
-                "limit": BOT_DIALOG_SEARCH_LIMIT,
-                "bot_peer": bot_peer,
-            },
-        )
-        search_results = client.search_messages(
-            chat_id=bot_peer,
-            query=query,
-            filter=messages_filter,
-            limit=BOT_DIALOG_SEARCH_LIMIT,
-        )
-        if search_results is not None:
-            async for candidate in search_results:
-                searched += 1
-                media_type = _detect_media_type(candidate)
-                if media_type is None:
-                    continue
-                total_media_scanned += 1
-                document_candidates += 1 if media_type == "document" else 0
-                video_candidates += 1 if media_type == "video" else 0
-                audio_candidates += 1 if media_type == "audio" else 0
-                matches = _message_matches_metadata(candidate, metadata)
-                self._log_bot_dialog_media_candidate(
-                    file_record_id=file_record_id,
-                    strategy="search_messages",
-                    candidate=candidate,
-                    metadata=metadata,
-                    media_type=media_type,
-                    matches=matches,
-                )
-                if not matches:
-                    self._log_message_match_failure(
-                        file_record_id=file_record_id,
-                        strategy="search_messages",
-                        candidate=candidate,
-                        metadata=metadata,
-                    )
-                if matches:
-                    self._logger.info(
-                        "bot-dialog matching media found by search",
-                        extra={
-                            "event": "bot_dialog_match_found",
-                            "file_record_id": file_record_id,
-                            "strategy": "search_messages",
-                            "scanned": searched,
-                            "resolved_message_id": getattr(candidate, "id", None),
-                            "file_name": _message_media_file_name(candidate, metadata),
-                            "file_size": _message_media_size(candidate, metadata),
-                            "resolved_file_unique_id_present": _message_media_unique_id(
-                                candidate, metadata
-                            )
-                            is not None,
-                        },
-                    )
-                    return candidate
-
-        self._logger.info(
-            "Searching bot dialog history",
-            extra={
-                "event": "bot_dialog_search_started",
-                "file_record_id": file_record_id,
-                "strategy": "get_chat_history",
-                "limit": BOT_DIALOG_SEARCH_LIMIT,
-                "bot_peer": bot_peer,
-            },
-        )
-        history_results = client.get_chat_history(
-            chat_id=bot_peer,
-            limit=BOT_DIALOG_SEARCH_LIMIT,
-        )
+        history_results = client.get_chat_history(chat_id=bot_peer, limit=10)
         if history_results is not None:
-            async for candidate in history_results:
-                searched += 1
-                media_type = _detect_media_type(candidate)
-                if media_type is None:
-                    continue
-                total_media_scanned += 1
-                document_candidates += 1 if media_type == "document" else 0
-                video_candidates += 1 if media_type == "video" else 0
-                audio_candidates += 1 if media_type == "audio" else 0
-                matches = _message_matches_metadata(candidate, metadata)
-                self._log_bot_dialog_media_candidate(
-                    file_record_id=file_record_id,
-                    strategy="get_chat_history",
-                    candidate=candidate,
-                    metadata=metadata,
-                    media_type=media_type,
-                    matches=matches,
+            async for message in history_results:
+                self._logger.info(
+                    "temporary raw bot-dialog history message",
+                    extra={
+                        "event": "bot_dialog_raw_history_message",
+                        "file_record_id": file_record_id,
+                        "bot_peer": bot_peer,
+                        "message_id": getattr(message, "id", None),
+                        "message_empty": bool(getattr(message, "empty", False)),
+                        "message_media": getattr(message, "media", None),
+                        "has_document": bool(getattr(message, "document", None)),
+                        "has_video": bool(getattr(message, "video", None)),
+                        "has_audio": bool(getattr(message, "audio", None)),
+                        "caption": getattr(message, "caption", None),
+                        "text": getattr(message, "text", None),
+                        "message_from_user_id": getattr(
+                            getattr(message, "from_user", None), "id", None
+                        ),
+                        "message_outgoing": getattr(message, "outgoing", None),
+                    },
                 )
-                if not matches:
-                    self._log_message_match_failure(
-                        file_record_id=file_record_id,
-                        strategy="get_chat_history",
-                        candidate=candidate,
-                        metadata=metadata,
-                    )
-                if matches:
-                    self._logger.info(
-                        "bot-dialog matching media found by history scan",
-                        extra={
-                            "event": "bot_dialog_match_found",
-                            "file_record_id": file_record_id,
-                            "strategy": "get_chat_history",
-                            "scanned": searched,
-                            "resolved_message_id": getattr(candidate, "id", None),
-                            "file_name": _message_media_file_name(candidate, metadata),
-                            "file_size": _message_media_size(candidate, metadata),
-                            "resolved_file_unique_id_present": _message_media_unique_id(
-                                candidate, metadata
-                            )
-                            is not None,
-                        },
-                    )
-                    return candidate
-
-        self._logger.warning(
-            "bot-dialog matching media was not found",
+        else:
+            self._logger.warning(
+                "temporary raw bot-dialog history iterator unavailable",
+                extra={
+                    "event": "bot_dialog_raw_history_unavailable",
+                    "file_record_id": file_record_id,
+                    "bot_peer": bot_peer,
+                },
+            )
+        self._logger.info(
+            "temporary raw bot-dialog history dump completed",
             extra={
-                "event": "bot_dialog_match_not_found",
+                "event": "bot_dialog_raw_history_dump_completed",
                 "file_record_id": file_record_id,
-                "bot_dialog_peer": bot_peer,
-                "expected_file_name": metadata.original_name,
-                "expected_size": metadata.size,
-                "expected_unique_id_present": metadata.telegram_file_unique_id is not None,
-                "file_type": metadata.file_type.value,
-                "scanned": searched,
-                "total_media_messages_scanned": total_media_scanned,
-                "document_candidates": document_candidates,
-                "video_candidates": video_candidates,
-                "audio_candidates": audio_candidates,
+                "bot_peer": bot_peer,
             },
         )
-        raise DownloadError(
-            "Pyrogram could not locate the matching media in the bot dialog. "
-            "Send the file to the bot again, or forward it with sender information visible "
-            "so the original channel message can be resolved."
-        )
+        del metadata
+        return None  # type: ignore[return-value]
 
     def _log_bot_dialog_media_candidate(
         self,
@@ -999,6 +887,60 @@ class DownloadManager:
                 "candidate_message_id": getattr(candidate, "id", None),
                 "candidate_chat_id": getattr(getattr(candidate, "chat", None), "id", None),
                 **_message_match_failure_details(candidate, metadata),
+            },
+        )
+
+    async def _resolve_bot_peer_id_for_diagnostics(
+        self,
+        client: PyrogramDownloadClient,
+        bot_peer: int | str,
+        file_record_id: int,
+    ) -> object:
+        try:
+            chat = await client.get_chat(bot_peer)
+        except Exception as exc:
+            self._logger.warning(
+                "could not resolve bot peer id for history diagnostics",
+                extra={
+                    "event": "bot_dialog_history_peer_resolution_failed",
+                    "file_record_id": file_record_id,
+                    "bot_peer": bot_peer,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return None
+        return getattr(chat, "id", None)
+
+    def _log_history_iteration_summary(
+        self,
+        file_record_id: int,
+        bot_peer: int | str,
+        resolved_peer_id: object,
+        total_messages: int,
+        total_media_messages: int,
+        highest_message_id: int | None,
+        lowest_message_id: int | None,
+        encountered_message_1163: bool,
+        ended_normally: bool,
+        stop_reason: str,
+        requested_limit: int,
+    ) -> None:
+        self._logger.info(
+            "bot-dialog history iteration summary",
+            extra={
+                "event": "bot_dialog_history_iteration_summary",
+                "file_record_id": file_record_id,
+                "bot_peer": bot_peer,
+                "resolved_peer_id": resolved_peer_id,
+                "requested_limit": requested_limit,
+                "total_messages_iterated": total_messages,
+                "total_media_messages": total_media_messages,
+                "highest_message_id": highest_message_id,
+                "lowest_message_id": lowest_message_id,
+                "encountered_message_1163": encountered_message_1163,
+                "ended_normally": ended_normally,
+                "stop_reason": stop_reason,
             },
         )
 

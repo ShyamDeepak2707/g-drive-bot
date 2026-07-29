@@ -25,6 +25,7 @@ from app.constants import (
 )
 from app.database.connection import SQLiteDatabase
 from app.job_state import JobState, require_transition
+from app.logging_config import get_logger
 from app.models import FileMetadata, Folder
 
 
@@ -105,6 +106,7 @@ class RepositoryStatistics:
 class DatabaseRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self._database = database
+        self._logger = get_logger(__name__)
 
     def create_user(
         self,
@@ -152,6 +154,20 @@ class DatabaseRepository:
         user_id: int,
         metadata: FileMetadata,
     ) -> FileRecord:
+        self._logger.info(
+            "creating media file record",
+            extra={
+                "event": "media_metadata_repository_create_trace",
+                "user_id": user_id,
+                "metadata_message_id": metadata.message_id,
+                "metadata_chat_id": metadata.chat_id,
+                "forward_origin_chat_id": metadata.forward_origin_chat_id,
+                "forward_origin_message_id": metadata.forward_origin_message_id,
+                "file_type": metadata.file_type.value,
+                "original_name": metadata.original_name,
+                "size": metadata.size,
+            },
+        )
         cursor = self._database.execute(
             """
             INSERT INTO files (
@@ -183,6 +199,20 @@ class DatabaseRepository:
         file_record = self.get_file_record(int(cursor.lastrowid))
         if file_record is None:
             raise RuntimeError("File record was not available after insert.")
+        self._logger.info(
+            "created media file record",
+            extra={
+                "event": "media_metadata_repository_created_trace",
+                "file_record_id": file_record.id,
+                "metadata_message_id": metadata.message_id,
+                "persisted_message_id": file_record.message_id,
+                "metadata_chat_id": metadata.chat_id,
+                "persisted_chat_id": file_record.chat_id,
+                "file_type": file_record.file_type,
+                "original_name": file_record.original_name,
+                "size": file_record.size,
+            },
+        )
         return file_record
 
     def get_file_record(self, file_id: int) -> FileRecord | None:
