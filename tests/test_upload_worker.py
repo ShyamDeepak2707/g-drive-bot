@@ -316,6 +316,7 @@ def test_upload_worker_edits_upload_progress_message(tmp_path: Path) -> None:
         uploader,
         notification_bot=bot,
         progress_interval_seconds=0.001,
+        progress_card_delay_seconds=0,
     )
 
     asyncio.run(worker.run_once())
@@ -328,6 +329,79 @@ def test_upload_worker_edits_upload_progress_message(tmp_path: Path) -> None:
     assert any("Destination: My Drive/Uploads" in text for text in texts)
     assert all(message["chat_id"] == 123 for message in bot.messages)
     assert all(message["message_id"] == 1000 for message in bot.messages)
+    database.close()
+
+
+def test_upload_worker_delays_upload_progress_card(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    _ready_file(
+        repository,
+        local_path=local_path,
+        status_chat_id=123,
+        status_message_id=99,
+    )
+    uploader = BlockingUploader()
+    bot = FakeNotificationBot()
+    worker = UploadWorker(
+        repository,
+        logging.getLogger("test.upload_worker"),
+        uploader,
+        notification_bot=bot,
+        progress_interval_seconds=0.001,
+        progress_card_delay_seconds=0.05,
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(worker.run_once())
+        assert await asyncio.to_thread(uploader.started.wait, 2)
+        await asyncio.sleep(0.01)
+        assert bot.messages == []
+        await asyncio.sleep(0.08)
+        assert bot.messages
+        uploader.release.set()
+        await task
+
+    asyncio.run(scenario())
+
+    assert "⬆️ Uploading" in str(bot.messages[0]["text"])
+    assert bot.messages[0]["message_id"] == 1000
+    database.close()
+
+
+def test_upload_worker_sends_completion_card_when_upload_finishes_before_delay(
+    tmp_path: Path,
+) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    _ready_file(
+        repository,
+        local_path=local_path,
+        status_chat_id=123,
+        status_message_id=99,
+    )
+    bot = FakeNotificationBot()
+    worker = UploadWorker(
+        repository,
+        logging.getLogger("test.upload_worker"),
+        FakeUploader(),
+        notification_bot=bot,
+        progress_interval_seconds=0.001,
+        progress_card_delay_seconds=5,
+    )
+
+    asyncio.run(worker.run_once())
+
+    assert len(bot.messages) == 1
+    assert "⬆️ Uploading" in str(bot.messages[0]["text"])
+    assert "<b>100%</b>" in str(bot.messages[0]["text"])
+    assert "✅ Done" in str(bot.messages[0]["text"])
     database.close()
 
 
@@ -678,7 +752,7 @@ def test_upload_worker_sends_transient_failure_notification(tmp_path: Path) -> N
 
     asyncio.run(worker.run_once())
 
-    assert len(bot.messages) == 2
+    assert len(bot.messages) == 1
     message = bot.messages[-1]
     assert message["chat_id"] == 456
     assert message["parse_mode"] == "HTML"
@@ -786,7 +860,7 @@ def test_upload_worker_sends_permanent_failure_notification(tmp_path: Path) -> N
     updated = repository.get_file_record(file_record.id)
     assert updated is not None
     assert updated.status == FILE_STATUS_FAILED
-    assert len(bot.messages) == 2
+    assert len(bot.messages) == 1
     message = bot.messages[-1]
     assert message["chat_id"] == 789
     assert "Upload Failed" in str(message["text"])

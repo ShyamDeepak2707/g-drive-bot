@@ -202,6 +202,7 @@ class UploadWorker:
         uploader: DriveUploader | None = None,
         notification_bot: UploadNotificationBot | None = None,
         progress_interval_seconds: float = constants.DOWNLOAD_PROGRESS_UPDATE_SECONDS,
+        progress_card_delay_seconds: float = constants.UPLOAD_PROGRESS_CARD_DELAY_SECONDS,
         retry_limit: int = constants.UPLOAD_RETRY_LIMIT,
         retry_backoff_base_seconds: float = constants.UPLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.UPLOAD_RETRY_MAX_DELAY_SECONDS,
@@ -211,6 +212,7 @@ class UploadWorker:
         self._uploader = uploader
         self._notification_bot = notification_bot
         self._progress_interval_seconds = progress_interval_seconds
+        self._progress_card_delay_seconds = progress_card_delay_seconds
         self._retry_limit = retry_limit
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
@@ -491,15 +493,14 @@ class UploadWorker:
             },
         )
         try:
+            upload_target: _UploadStatusTarget | None = None
+            progress_task: asyncio.Task[_UploadStatusTarget | None] | None = None
             upload_input = self._resolve_upload_input(updated)
-            upload_target = await self._send_upload_started_message(updated, upload_input)
             progress_state = _UploadProgressState()
-            progress_task: asyncio.Task[None] | None = None
-            if upload_target is not None:
-                progress_task = asyncio.create_task(
-                    self._flush_upload_progress(upload_target, updated, progress_state),
-                    name=f"upload-progress-{updated.id}",
-                )
+            progress_task = asyncio.create_task(
+                self._send_and_flush_upload_progress(updated, upload_input, progress_state),
+                name=f"upload-progress-{updated.id}",
+            )
             loop = asyncio.get_running_loop()
 
             def progress_callback(snapshot: ProgressSnapshot) -> None:
@@ -510,19 +511,20 @@ class UploadWorker:
                     snapshot,
                 )
 
-            try:
-                uploaded_file = await asyncio.to_thread(
-                    self._upload,
-                    upload_input,
-                    progress_callback,
-                )
-            finally:
-                await _stop_progress_task(progress_task)
+            uploaded_file = await asyncio.to_thread(
+                self._upload,
+                upload_input,
+                progress_callback,
+            )
             if self._is_cancel_requested(updated.id):
+                await _stop_progress_task(progress_task)
                 self._mark_upload_cancelled(updated.id, source="post_upload")
                 return
             self._verify_upload(uploaded_file, upload_input.expected_size, updated.id)
+            upload_target = await _stop_progress_task(progress_task)
+            progress_task = None
         except Exception as exc:
+            await _stop_progress_task(progress_task)
             if self._is_cancel_requested(updated.id):
                 self._mark_upload_cancelled(updated.id, source="upload_exception")
                 return
@@ -547,16 +549,19 @@ class UploadWorker:
         )
         if uploaded is not None:
             finalized = self._finalize_uploaded(uploaded)
+            complete_message = _upload_complete_message(
+                updated,
+                upload_input,
+                uploaded_file=uploaded_file,
+                finalized=finalized,
+            )
             if upload_target is not None:
                 await self._safe_edit_message(
                     upload_target,
-                    _upload_complete_message(
-                        updated,
-                        upload_input,
-                        uploaded_file=uploaded_file,
-                        finalized=finalized,
-                    ),
+                    complete_message,
                 )
+            else:
+                await self._send_upload_completion_message(updated, complete_message)
 
     def _recover_uploaded_after_restart(self, file_record: FileRecord) -> bool:
         if file_record.google_drive_file_id is None:
@@ -916,6 +921,61 @@ class UploadWorker:
             message_id=message_id,
         )
 
+    async def _send_upload_completion_message(
+        self,
+        file_record: FileRecord,
+        message: TelegramMessage,
+    ) -> None:
+        if self._notification_bot is None:
+            return
+        download = self._repository.get_download(file_record.id)
+        if download is None or download.status_chat_id is None:
+            return
+        try:
+            await self._notification_bot.send_message(
+                chat_id=download.status_chat_id,
+                text=message.text,
+                parse_mode=message.parse_mode,
+                disable_web_page_preview=message.disable_web_page_preview,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "failed to send upload completion message",
+                extra={
+                    "event": "upload_completion_send_failed",
+                    "file_record_id": file_record.id,
+                    "status_chat_id": download.status_chat_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+    async def _send_and_flush_upload_progress(
+        self,
+        file_record: FileRecord,
+        upload_input: _UploadInput,
+        state: _UploadProgressState,
+    ) -> _UploadStatusTarget | None:
+        delay = max(0.0, self._progress_card_delay_seconds)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if self._is_cancel_requested(file_record.id):
+            return None
+        target = await self._send_upload_started_message(file_record, upload_input)
+        if target is None:
+            return None
+        try:
+            snapshot = state.latest
+            if snapshot is not None:
+                await self._safe_edit_message(
+                    target,
+                    _upload_progress_message(file_record, snapshot),
+                )
+            await self._flush_upload_progress(target, file_record, state)
+        except asyncio.CancelledError:
+            return target
+        return target
+
     def _record_upload_progress(
         self,
         file_record_id: int,
@@ -1223,14 +1283,20 @@ def _upload_progress_current(status: object, fallback_total: int) -> int:
     return 0
 
 
-async def _stop_progress_task(task: asyncio.Task[None] | None) -> None:
+async def _stop_progress_task(
+    task: asyncio.Task[_UploadStatusTarget | None] | None,
+) -> _UploadStatusTarget | None:
     if task is None or task.done():
-        return
+        if task is None:
+            return None
+        with contextlib.suppress(asyncio.CancelledError):
+            return task.result()
+        return None
     task.cancel()
     try:
-        await task
+        return await task
     except asyncio.CancelledError:
-        pass
+        return None
 
 
 def _classify_upload_failure(exc: Exception) -> _UploadFailureClassification:
