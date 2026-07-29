@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,7 +16,10 @@ from googleapiclient.errors import HttpError
 from app import constants
 from app.database import DatabaseRepository, FileRecord
 from app.job_state import InvalidJobStateTransition, JobState, should_start_upload
-from app.ui.messages import TelegramMessage, error_card, warning_card
+from app.progress import ProgressSnapshot, format_bytes, format_duration
+from app.ui.messages import TelegramMessage, error_card, progress_card, warning_card
+
+UploadProgressCallback = Callable[[ProgressSnapshot], None]
 
 
 class UploadError(Exception):
@@ -84,6 +89,7 @@ class DriveUploader(Protocol):
         filename: str,
         mime_type: str | None,
         folder_id: str,
+        progress_callback: UploadProgressCallback | None = None,
     ) -> UploadedFile: ...
 
 
@@ -91,6 +97,15 @@ class UploadNotificationBot(Protocol):
     async def send_message(
         self,
         chat_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> object: ...
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
         text: str,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
@@ -107,9 +122,12 @@ class GoogleDriveUploader:
         filename: str,
         mime_type: str | None,
         folder_id: str,
+        progress_callback: UploadProgressCallback | None = None,
     ) -> UploadedFile:
         from googleapiclient.http import MediaFileUpload
 
+        total_size = local_path.stat().st_size
+        started_at = time.perf_counter()
         media = MediaFileUpload(
             str(local_path),
             mimetype=mime_type,
@@ -124,10 +142,25 @@ class GoogleDriveUploader:
             fields="id",
             supportsAllDrives=True,
         )
-        response = request.execute()
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status is not None:
+                _emit_upload_progress(
+                    progress_callback=progress_callback,
+                    current=_upload_progress_current(status, total_size),
+                    total=total_size,
+                    started_at=started_at,
+                )
         drive_file_id = response.get("id") if isinstance(response, dict) else None
         if not isinstance(drive_file_id, str) or not drive_file_id:
             raise UploadError("Google Drive upload did not return a file id.")
+        _emit_upload_progress(
+            progress_callback=progress_callback,
+            current=total_size,
+            total=total_size,
+            started_at=started_at,
+        )
         metadata_request = self._service.files().get(
             fileId=drive_file_id,
             fields="id,size",
@@ -150,6 +183,17 @@ class _UploadInput:
     expected_size: int | None
 
 
+@dataclass
+class _UploadProgressState:
+    latest: ProgressSnapshot | None = None
+
+
+@dataclass(frozen=True)
+class _UploadStatusTarget:
+    chat_id: int
+    message_id: int
+
+
 class UploadWorker:
     def __init__(
         self,
@@ -157,6 +201,7 @@ class UploadWorker:
         logger: logging.Logger,
         uploader: DriveUploader | None = None,
         notification_bot: UploadNotificationBot | None = None,
+        progress_interval_seconds: float = constants.DOWNLOAD_PROGRESS_UPDATE_SECONDS,
         retry_limit: int = constants.UPLOAD_RETRY_LIMIT,
         retry_backoff_base_seconds: float = constants.UPLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.UPLOAD_RETRY_MAX_DELAY_SECONDS,
@@ -165,10 +210,12 @@ class UploadWorker:
         self._logger = logger
         self._uploader = uploader
         self._notification_bot = notification_bot
+        self._progress_interval_seconds = progress_interval_seconds
         self._retry_limit = retry_limit
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
         self._current_file_record: FileRecord | None = None
+        self._current_progress: ProgressSnapshot | None = None
         self._cancelled_file_ids: set[int] = set()
         self._completed_since_startup = 0
         self._failed_since_startup = 0
@@ -231,7 +278,7 @@ class UploadWorker:
             current_upload = CurrentUploadSnapshot(
                 file_record_id=self._current_file_record.id,
                 filename=_file_record_filename(self._current_file_record),
-                progress_percent=None,
+                progress_percent=_progress_percent(self._current_progress),
                 status=self._current_file_record.status,
             )
         return UploadWorkerSnapshot(
@@ -356,6 +403,7 @@ class UploadWorker:
                 finalized = self._recover_uploaded_after_restart(recoverable_uploaded_record)
             finally:
                 self._current_file_record = None
+                self._current_progress = None
             return _ProcessedUploadJob(
                 recoverable_uploaded_record.id,
                 defer_for_run=not finalized,
@@ -370,6 +418,7 @@ class UploadWorker:
                 finalized = self._finalize_uploaded(uploaded_record)
             finally:
                 self._current_file_record = None
+                self._current_progress = None
             return _ProcessedUploadJob(uploaded_record.id, defer_for_run=not finalized)
 
         file_record = self._repository.get_next_ready_for_upload(
@@ -382,6 +431,7 @@ class UploadWorker:
             await self._claim_and_upload(file_record)
         finally:
             self._current_file_record = None
+            self._current_progress = None
         return _ProcessedUploadJob(file_record.id)
 
     async def _claim_and_upload(self, file_record: FileRecord) -> None:
@@ -442,7 +492,36 @@ class UploadWorker:
         )
         try:
             upload_input = self._resolve_upload_input(updated)
-            uploaded_file = await asyncio.to_thread(self._upload, upload_input)
+            upload_target = self._upload_status_target(updated.id)
+            progress_state = _UploadProgressState()
+            progress_task: asyncio.Task[None] | None = None
+            if upload_target is not None:
+                await self._safe_edit_message(
+                    upload_target,
+                    _upload_started_message(updated, upload_input),
+                )
+                progress_task = asyncio.create_task(
+                    self._flush_upload_progress(upload_target, updated, progress_state),
+                    name=f"upload-progress-{updated.id}",
+                )
+            loop = asyncio.get_running_loop()
+
+            def progress_callback(snapshot: ProgressSnapshot) -> None:
+                loop.call_soon_threadsafe(
+                    self._record_upload_progress,
+                    updated.id,
+                    progress_state,
+                    snapshot,
+                )
+
+            try:
+                uploaded_file = await asyncio.to_thread(
+                    self._upload,
+                    upload_input,
+                    progress_callback,
+                )
+            finally:
+                await _stop_progress_task(progress_task)
             if self._is_cancel_requested(updated.id):
                 self._mark_upload_cancelled(updated.id, source="post_upload")
                 return
@@ -471,7 +550,12 @@ class UploadWorker:
             },
         )
         if uploaded is not None:
-            self._finalize_uploaded(uploaded)
+            finalized = self._finalize_uploaded(uploaded)
+            if upload_target is not None:
+                await self._safe_edit_message(
+                    upload_target,
+                    _upload_complete_message(updated, upload_input, finalized=finalized),
+                )
 
     def _recover_uploaded_after_restart(self, file_record: FileRecord) -> bool:
         if file_record.google_drive_file_id is None:
@@ -523,7 +607,11 @@ class UploadWorker:
             expected_size=file_record.size,
         )
 
-    def _upload(self, upload_input: _UploadInput) -> UploadedFile:
+    def _upload(
+        self,
+        upload_input: _UploadInput,
+        progress_callback: UploadProgressCallback | None,
+    ) -> UploadedFile:
         if self._uploader is None:
             raise UploadError("Google Drive uploader is not configured.")
         return self._uploader.upload_file(
@@ -531,6 +619,7 @@ class UploadWorker:
             filename=upload_input.filename,
             mime_type=upload_input.mime_type,
             folder_id=upload_input.folder_id,
+            progress_callback=progress_callback,
         )
 
     def _verify_upload(
@@ -772,6 +861,90 @@ class UploadWorker:
             },
         )
 
+    def _upload_status_target(self, file_record_id: int) -> _UploadStatusTarget | None:
+        download = self._repository.get_download(file_record_id)
+        if (
+            download is None
+            or download.status_chat_id is None
+            or download.status_message_id is None
+        ):
+            self._logger.info(
+                "upload progress message skipped because no Telegram status message is stored",
+                extra={
+                    "event": "upload_progress_message_skipped",
+                    "file_record_id": file_record_id,
+                    "download_record_present": download is not None,
+                },
+            )
+            return None
+        return _UploadStatusTarget(
+            chat_id=download.status_chat_id,
+            message_id=download.status_message_id,
+        )
+
+    def _record_upload_progress(
+        self,
+        file_record_id: int,
+        state: _UploadProgressState,
+        snapshot: ProgressSnapshot,
+    ) -> None:
+        if self._is_cancel_requested(file_record_id):
+            return
+        state.latest = snapshot
+        if self._current_file_record is not None and self._current_file_record.id == file_record_id:
+            self._current_progress = snapshot
+
+    async def _flush_upload_progress(
+        self,
+        target: _UploadStatusTarget,
+        file_record: FileRecord,
+        state: _UploadProgressState,
+    ) -> None:
+        last_flushed: ProgressSnapshot | None = None
+        interval = max(0.001, self._progress_interval_seconds)
+        while True:
+            await asyncio.sleep(interval)
+            snapshot = state.latest
+            if snapshot is None or snapshot == last_flushed:
+                continue
+            await self._safe_edit_message(
+                target,
+                _upload_progress_message(file_record, snapshot),
+            )
+            last_flushed = snapshot
+
+    async def _safe_edit_message(
+        self,
+        target: _UploadStatusTarget,
+        message: TelegramMessage,
+    ) -> None:
+        if self._notification_bot is None:
+            return
+        try:
+            await self._notification_bot.edit_message_text(
+                chat_id=target.chat_id,
+                message_id=target.message_id,
+                text=message.text,
+                parse_mode=message.parse_mode,
+                disable_web_page_preview=message.disable_web_page_preview,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "failed to edit upload progress message",
+                extra={
+                    "event": "upload_progress_edit_failed",
+                    "file_record_id": (
+                        self._current_file_record.id
+                        if self._current_file_record is not None
+                        else None
+                    ),
+                    "status_chat_id": target.chat_id,
+                    "status_message_id": target.message_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
     async def _notify_upload_failure(
         self,
         *,
@@ -854,6 +1027,76 @@ def _file_record_filename(file_record: FileRecord) -> str:
     return file_record.original_name or f"{file_record.file_type or 'file'}-{file_record.id}"
 
 
+def _progress_percent(snapshot: ProgressSnapshot | None) -> int | None:
+    if snapshot is None or not snapshot.total:
+        return None
+    return min(100, max(0, int((snapshot.current / snapshot.total) * 100)))
+
+
+def _upload_started_message(file_record: FileRecord, upload_input: _UploadInput) -> TelegramMessage:
+    return progress_card(
+        "⬆️ Uploading",
+        filename=_file_record_filename(file_record),
+        percent=0,
+        transferred_size=format_bytes(0),
+        total_size=format_bytes(upload_input.expected_size),
+        speed="Calculating",
+        status_text="Upload started.",
+    )
+
+
+def _upload_progress_message(
+    file_record: FileRecord,
+    snapshot: ProgressSnapshot,
+) -> TelegramMessage:
+    return progress_card(
+        "⬆️ Uploading",
+        filename=_file_record_filename(file_record),
+        percent=_progress_percent(snapshot),
+        transferred_size=format_bytes(snapshot.current),
+        total_size=format_bytes(snapshot.total),
+        speed=_upload_speed(snapshot),
+        eta=_upload_eta(snapshot),
+    )
+
+
+def _upload_complete_message(
+    file_record: FileRecord,
+    upload_input: _UploadInput,
+    *,
+    finalized: bool,
+) -> TelegramMessage:
+    total_size = upload_input.expected_size or _safe_file_size(upload_input.local_path)
+    status_text = "✅ Done" if finalized else "✅ Uploaded; cleanup pending"
+    return progress_card(
+        "⬆️ Uploading",
+        filename=_file_record_filename(file_record),
+        percent=100,
+        transferred_size=format_bytes(total_size),
+        total_size=format_bytes(total_size),
+        status_text=status_text,
+    )
+
+
+def _upload_speed(snapshot: ProgressSnapshot) -> str:
+    if snapshot.speed_bytes_per_second is None:
+        return "Calculating"
+    return f"{format_bytes(int(snapshot.speed_bytes_per_second))}/s"
+
+
+def _upload_eta(snapshot: ProgressSnapshot) -> str | None:
+    if snapshot.eta_seconds is None:
+        return None
+    return format_duration(snapshot.eta_seconds)
+
+
+def _safe_file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
 def _upload_failure_message(
     *,
     file_record: FileRecord,
@@ -900,6 +1143,53 @@ def _truncate_text(value: str, max_length: int) -> str:
 def _delete_file_if_present(path: Path) -> None:
     with contextlib.suppress(FileNotFoundError):
         os.remove(path)
+
+
+def _emit_upload_progress(
+    *,
+    progress_callback: UploadProgressCallback | None,
+    current: int,
+    total: int | None,
+    started_at: float,
+) -> None:
+    if progress_callback is None:
+        return
+    elapsed = max(0.001, time.perf_counter() - started_at)
+    speed = current / elapsed
+    remaining = max(0, (total or current) - current)
+    eta = remaining / speed if speed > 0 and total else None
+    progress_callback(
+        ProgressSnapshot(
+            current=current,
+            total=total,
+            speed_bytes_per_second=speed,
+            eta_seconds=eta,
+        )
+    )
+
+
+def _upload_progress_current(status: object, fallback_total: int) -> int:
+    value = getattr(status, "resumable_progress", None)
+    if isinstance(value, int):
+        return min(fallback_total, max(0, value))
+    progress = getattr(status, "progress", None)
+    if callable(progress):
+        try:
+            fraction = float(progress())
+        except (TypeError, ValueError):
+            return 0
+        return min(fallback_total, max(0, int(fallback_total * fraction)))
+    return 0
+
+
+async def _stop_progress_task(task: asyncio.Task[None] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 def _classify_upload_failure(exc: Exception) -> _UploadFailureClassification:

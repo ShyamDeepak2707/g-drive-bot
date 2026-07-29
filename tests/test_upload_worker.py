@@ -18,7 +18,13 @@ from app.constants import (
 from app.database import DatabaseRepository, FileRecord, SQLiteDatabase
 from app.job_state import JobState
 from app.models import FileMetadata, Folder, TelegramFileType
-from app.upload_worker import GoogleDriveUploader, UploadedFile, UploadWorker
+from app.progress import ProgressSnapshot
+from app.upload_worker import (
+    GoogleDriveUploader,
+    UploadedFile,
+    UploadProgressCallback,
+    UploadWorker,
+)
 
 
 class FakeUploader:
@@ -43,6 +49,7 @@ class FakeUploader:
         filename: str,
         mime_type: str | None,
         folder_id: str,
+        progress_callback: UploadProgressCallback | None = None,
     ) -> UploadedFile:
         self.calls += 1
         self.local_path = local_path
@@ -51,6 +58,16 @@ class FakeUploader:
         self.folder_id = folder_id
         if self.fail:
             raise RuntimeError("temporary drive failure")
+        if progress_callback is not None:
+            size = local_path.stat().st_size
+            progress_callback(
+                ProgressSnapshot(
+                    current=size,
+                    total=size,
+                    speed_bytes_per_second=1024.0,
+                    eta_seconds=0,
+                )
+            )
         return UploadedFile(
             drive_file_id=self.drive_file_id,
             size=(
@@ -71,11 +88,12 @@ class BlockingUploader(FakeUploader):
         filename: str,
         mime_type: str | None,
         folder_id: str,
+        progress_callback: UploadProgressCallback | None = None,
     ) -> UploadedFile:
         self.started.set()
         if not self.release.wait(timeout=5):
             raise RuntimeError("upload test timed out")
-        return super().upload_file(local_path, filename, mime_type, folder_id)
+        return super().upload_file(local_path, filename, mime_type, folder_id, progress_callback)
 
 
 class FakeNotificationBot:
@@ -102,13 +120,53 @@ class FakeNotificationBot:
         )
         return object()
 
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> object:
+        if self.fail:
+            raise RuntimeError("Telegram edit failed")
+        self.messages.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": disable_web_page_preview,
+            }
+        )
+        return object()
+
+
+class FakeUploadStatus:
+    def __init__(self, current: int, total: int) -> None:
+        self.resumable_progress = current
+        self.total_size = total
+
+    def progress(self) -> float:
+        return self.resumable_progress / self.total_size
+
 
 class FakeDriveRequest:
-    def __init__(self, response: dict[str, object]) -> None:
+    def __init__(
+        self,
+        response: dict[str, object],
+        chunks: list[tuple[FakeUploadStatus | None, dict[str, object] | None]] | None = None,
+    ) -> None:
         self.response = response
+        self.chunks = chunks or []
 
     def execute(self) -> dict[str, object]:
         return self.response
+
+    def next_chunk(self) -> tuple[FakeUploadStatus | None, dict[str, object] | None]:
+        if not self.chunks:
+            return None, self.response
+        return self.chunks.pop(0)
 
 
 class FakeDriveFilesResource:
@@ -118,7 +176,13 @@ class FakeDriveFilesResource:
 
     def create(self, **kwargs: object) -> FakeDriveRequest:
         self.created = kwargs
-        return FakeDriveRequest({"id": "drive-file-id"})
+        return FakeDriveRequest(
+            {"id": "drive-file-id"},
+            chunks=[
+                (FakeUploadStatus(2, 5), None),
+                (FakeUploadStatus(5, 5), {"id": "drive-file-id"}),
+            ],
+        )
 
     def get(self, **kwargs: object) -> FakeDriveRequest:
         self.fetched_file_id = str(kwargs["fileId"])
@@ -138,18 +202,22 @@ def test_google_drive_uploader_fetches_metadata_after_upload(tmp_path: Path) -> 
     local_path.write_text("hello", encoding="utf-8")
     service = FakeDriveService()
     uploader = GoogleDriveUploader(service)
+    progress: list[ProgressSnapshot] = []
 
     uploaded = uploader.upload_file(
         local_path=local_path,
         filename="example.txt",
         mime_type="text/plain",
         folder_id="folder-id",
+        progress_callback=progress.append,
     )
 
     assert uploaded.drive_file_id == "drive-file-id"
     assert uploaded.size == 5
     assert service.files_resource.created is not None
     assert service.files_resource.fetched_file_id == "drive-file-id"
+    assert [snapshot.current for snapshot in progress] == [2, 5, 5]
+    assert all(snapshot.total == 5 for snapshot in progress)
 
 
 def test_upload_worker_exits_cleanly_when_no_ready_jobs(
@@ -216,6 +284,39 @@ def test_upload_worker_uploads_next_ready_job_and_persists_drive_id(
         and getattr(record, "file_record_id", None) == file_record.id
         for record in caplog.records
     )
+    database.close()
+
+
+def test_upload_worker_edits_upload_progress_message(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    local_path = tmp_path / "example-1.txt"
+    local_path.write_text("hello", encoding="utf-8")
+    _ready_file(
+        repository,
+        local_path=local_path,
+        status_chat_id=123,
+        status_message_id=99,
+    )
+    uploader = FakeUploader()
+    bot = FakeNotificationBot()
+    worker = UploadWorker(
+        repository,
+        logging.getLogger("test.upload_worker"),
+        uploader,
+        notification_bot=bot,
+        progress_interval_seconds=0.001,
+    )
+
+    asyncio.run(worker.run_once())
+
+    texts = [str(message["text"]) for message in bot.messages]
+    assert any("⬆️ Uploading" in text and "<b>0%</b>" in text for text in texts)
+    assert any("⬆️ Uploading" in text and "<b>100%</b>" in text for text in texts)
+    assert any("✅ Done" in text for text in texts)
+    assert all(message["chat_id"] == 123 for message in bot.messages)
+    assert all(message["message_id"] == 99 for message in bot.messages)
     database.close()
 
 
