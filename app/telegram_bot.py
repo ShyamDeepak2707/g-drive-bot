@@ -62,6 +62,7 @@ FOLDER_TOKEN_COUNTER_KEY = "folder_token_counter"
 StatusDisplayMode = Literal["mobile", "desktop"]
 STATUS_MOBILE_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━"
 STATUS_DESKTOP_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+DESTINATION_PROMPT_RECENT_LIMIT = 3
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -946,11 +947,20 @@ async def _send_destination_entry_prompt(
     repository = _get_repository(context)
     user_record = _get_current_user_record(update, context)
     last_folder = repository.get_last_folder(user_record.id) if user_record else None
-    if last_folder is None:
+    recent_folders = (
+        repository.list_recent_folders(
+            user_record.id,
+            min(_get_folder_recent_limit(context), DESTINATION_PROMPT_RECENT_LIMIT + 1),
+        )
+        if user_record
+        else []
+    )
+    if last_folder is None and not recent_folders:
         await _send_folder_home(update, context, file_record_id, text)
         return
-    keyboard = InlineKeyboardMarkup(
-        [
+    rows: list[list[InlineKeyboardButton]] = []
+    if last_folder is not None:
+        rows.append(
             [
                 InlineKeyboardButton(
                     f"📂 Last Folder: {_shorten(last_folder.name)}",
@@ -959,7 +969,24 @@ async def _send_destination_entry_prompt(
                         file_record_id,
                     ),
                 )
-            ],
+            ]
+        )
+    for folder in _unique_recent_prompt_folders(recent_folders, last_folder):
+        token = _remember_folder_token(context, folder)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🕒 {_shorten(folder.name)}",
+                    callback_data=_folder_callback(
+                        constants.FOLDER_ACTION_SELECT,
+                        file_record_id,
+                        token,
+                    ),
+                )
+            ]
+        )
+    rows.extend(
+        [
             [
                 InlineKeyboardButton(
                     "📂 Choose Another",
@@ -977,6 +1004,7 @@ async def _send_destination_entry_prompt(
             ],
         ]
     )
+    keyboard = InlineKeyboardMarkup(rows)
     await _reply_or_edit(update, text, keyboard)
 
 
@@ -1750,6 +1778,22 @@ def _folder_from_token(context: ContextTypes.DEFAULT_TYPE, token: str) -> Folder
         return None
     token_map = cast(dict[str, Folder], context.user_data.get(FOLDER_TOKEN_KEY, {}))
     return token_map.get(token)
+
+
+def _unique_recent_prompt_folders(
+    recent_folders: list[Folder],
+    last_folder: Folder | None,
+) -> tuple[Folder, ...]:
+    folders: list[Folder] = []
+    seen_ids: set[str] = {last_folder.id} if last_folder is not None else set()
+    for folder in recent_folders:
+        if folder.id in seen_ids:
+            continue
+        seen_ids.add(folder.id)
+        folders.append(folder)
+        if len(folders) >= DESTINATION_PROMPT_RECENT_LIMIT:
+            break
+    return tuple(folders)
 
 
 def _set_current_folder_view(
