@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 from googleapiclient.discovery import Resource
 from googleapiclient.errors import HttpError
@@ -220,9 +222,12 @@ class DriveFolderBrowser:
         return folder
 
     def validate_folder_id(self, folder_id: str) -> FolderValidationResult:
-        normalized = folder_id.strip()
+        normalized = extract_google_drive_id(folder_id)
         if normalized == "":
-            return FolderValidationResult(False, error_message="Folder ID cannot be empty.")
+            return FolderValidationResult(
+                False,
+                error_message="Paste a valid Google Drive folder ID or folder link.",
+            )
 
         try:
             item = self._files_get(normalized)
@@ -337,6 +342,33 @@ class DriveFolderBrowser:
 
 def _escape_query_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def extract_google_drive_id(value: str) -> str:
+    normalized = value.strip()
+    if normalized == "":
+        return ""
+
+    parsed = urlparse(normalized)
+    if parsed.query:
+        query_id = parse_qs(parsed.query).get("id")
+        if query_id and query_id[0].strip():
+            return query_id[0].strip()
+
+    patterns = (
+        r"/folders/([A-Za-z0-9_-]+)",
+        r"/file/d/([A-Za-z0-9_-]+)",
+        r"/open/([A-Za-z0-9_-]+)",
+        r"/d/([A-Za-z0-9_-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, parsed.path)
+        if match is not None:
+            return match.group(1)
+
+    if re.fullmatch(r"[A-Za-z0-9_-]+", normalized):
+        return normalized
+    return ""
 
 
 def _friendly_http_error(exc: HttpError) -> str:

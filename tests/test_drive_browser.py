@@ -4,7 +4,7 @@ from typing import cast
 
 from googleapiclient.errors import HttpError
 
-from app.drive.browser import DriveFolderBrowser, TTLCache
+from app.drive.browser import DriveFolderBrowser, TTLCache, extract_google_drive_id
 
 
 class FakeRequest:
@@ -131,6 +131,36 @@ def test_validate_folder_id_requires_accessible_writable_folder() -> None:
     assert not missing.is_valid
     assert missing.error_message is not None
     assert "find" in missing.error_message
+
+
+def test_validate_folder_id_accepts_google_drive_folder_links() -> None:
+    service = FakeDriveService()
+    service.files_resource.get_responses["folder-1"] = _folder_item(
+        "folder-1",
+        "Uploads",
+        ["root"],
+        writable=True,
+    )
+    browser = DriveFolderBrowser(service, cache_ttl_seconds=60)  # type: ignore[arg-type]
+
+    result = browser.validate_folder_id(
+        "https://drive.google.com/drive/folders/folder-1?usp=sharing"
+    )
+
+    assert result.is_valid
+    assert result.folder is not None
+    assert result.folder.id == "folder-1"
+    assert service.files_resource.get_calls == ["folder-1"]
+
+
+def test_extract_google_drive_id_supports_common_link_formats() -> None:
+    assert extract_google_drive_id("folder-1") == "folder-1"
+    assert (
+        extract_google_drive_id("https://drive.google.com/drive/folders/folder-1?usp=sharing")
+        == "folder-1"
+    )
+    assert extract_google_drive_id("https://drive.google.com/open?id=folder-2") == "folder-2"
+    assert extract_google_drive_id("https://example.com/not-drive") == ""
 
 
 def test_ttl_cache_can_invalidate_by_prefix() -> None:

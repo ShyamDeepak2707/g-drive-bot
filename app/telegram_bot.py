@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal, cast
 
+from googleapiclient.errors import HttpError
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
     Application,
@@ -1034,7 +1035,18 @@ async def _send_browse_roots(
     file_record_id: int,
     folder_browser: DriveFolderBrowser,
 ) -> None:
-    drives = folder_browser.list_shared_drives()
+    try:
+        drives = folder_browser.list_shared_drives()
+    except HttpError as exc:
+        _get_logger(context).warning(
+            "failed to list shared drives",
+            extra={
+                "event": "folder_browse_shared_drives_failed",
+                "file_record_id": file_record_id,
+                "error": str(exc),
+            },
+        )
+        drives = ()
     if context.user_data is not None:
         context.user_data[FOLDER_SHARED_DRIVES_KEY] = drives
     rows = [
@@ -1086,13 +1098,50 @@ async def _show_folder_page(
     page_token: str | None = None,
     refresh: bool = False,
 ) -> None:
-    page = folder_browser.list_folders(
-        parent_id=parent_id,
-        drive_id=drive_id,
-        page_token=page_token,
-        parent_path=parent_path,
-        refresh=refresh,
-    )
+    try:
+        page = folder_browser.list_folders(
+            parent_id=parent_id,
+            drive_id=drive_id,
+            page_token=page_token,
+            parent_path=parent_path,
+            refresh=refresh,
+        )
+    except HttpError as exc:
+        _get_logger(context).warning(
+            "failed to list drive folders",
+            extra={
+                "event": "folder_browse_list_failed",
+                "file_record_id": file_record_id,
+                "parent_id": parent_id,
+                "drive_id": drive_id,
+                "error": str(exc),
+            },
+        )
+        await _reply_or_edit(
+            update,
+            _folder_list_error_message(exc),
+            InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Back",
+                            callback_data=_folder_callback(
+                                constants.FOLDER_ACTION_BACK,
+                                file_record_id,
+                            ),
+                        ),
+                        InlineKeyboardButton(
+                            "Cancel",
+                            callback_data=_folder_callback(
+                                constants.FOLDER_ACTION_CANCEL,
+                                file_record_id,
+                            ),
+                        ),
+                    ]
+                ]
+            ),
+        )
+        return
     view: dict[str, object] = {
         "mode": "browse",
         "parent_id": parent_id,
@@ -1114,7 +1163,24 @@ async def _show_search_results(
     page_token: str | None = None,
     refresh: bool = False,
 ) -> None:
-    page = folder_browser.search_folders(query_text, page_token=page_token, refresh=refresh)
+    try:
+        page = folder_browser.search_folders(query_text, page_token=page_token, refresh=refresh)
+    except HttpError as exc:
+        _get_logger(context).warning(
+            "failed to search drive folders",
+            extra={
+                "event": "folder_search_failed",
+                "file_record_id": file_record_id,
+                "query": query_text,
+                "error": str(exc),
+            },
+        )
+        await _reply_or_edit(
+            update,
+            _folder_list_error_message(exc),
+            _cancel_keyboard(file_record_id),
+        )
+        return
     view: dict[str, object] = {
         "mode": "search",
         "query": query_text,
@@ -1748,6 +1814,18 @@ def _shorten(value: str, limit: int = 34) -> str:
     if len(value) <= limit:
         return value
     return f"{value[: limit - 3]}..."
+
+
+def _folder_list_error_message(exc: HttpError) -> str:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status == 403:
+        return (
+            "I cannot browse Google Drive with the current authorization. "
+            "Re-authorize Google Drive with the full Drive scope and try again."
+        )
+    if status == 404:
+        return "I could not find that Drive location. Go back and choose another folder."
+    return "I could not load folders from Google Drive right now. Try again later."
 
 
 def _extract_file_metadata(message: Message) -> FileMetadata | None:

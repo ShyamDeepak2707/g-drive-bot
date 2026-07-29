@@ -124,6 +124,9 @@ _CONSOLE_EXTRA_KEYS = (
     "total_media_messages",
     "ended_normally",
     "stop_reason",
+    "parent_id",
+    "drive_id",
+    "query",
 )
 
 

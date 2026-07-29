@@ -229,7 +229,7 @@ Then edit `.env` with your own values. Do not commit `.env`, session files, OAut
 | `PYROGRAM_SESSION_BASE64` | No | Empty | Base64-encoded Pyrogram `.session` file for cloud deployments. |
 | `GOOGLE_CREDENTIALS_FILE` | Yes in production | `credentials.json` | Google OAuth client credentials file. |
 | `GOOGLE_TOKEN_FILE` | Yes after auth | `data/token.json` | Google OAuth token cache. |
-| `GOOGLE_SCOPES` | No | `https://www.googleapis.com/auth/drive.file` | Comma-separated Google OAuth scopes. |
+| `GOOGLE_SCOPES` | No | `https://www.googleapis.com/auth/drive` | Comma-separated Google OAuth scopes. Full Drive scope is required for folder browsing and selecting arbitrary destination folders. |
 | `GOOGLE_AUTO_AUTH` | No | `false` | Enables interactive OAuth flow when generating a token locally. |
 | `GOOGLE_CREDENTIALS_BASE64` | No | Empty | Base64-encoded Google OAuth client credentials for cloud deployments. |
 | `GOOGLE_TOKEN_BASE64` | No | Empty | Base64-encoded Google OAuth token file for cloud deployments. |
