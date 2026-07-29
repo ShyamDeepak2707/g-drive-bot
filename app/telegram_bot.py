@@ -1346,9 +1346,24 @@ async def _select_destination_folder(
     selected = replace(result.folder, path=folder.path)
     repository = _get_repository(context)
     user_record = _get_current_user_record(update, context)
-    repository.set_file_destination_folder(file_record_id, selected)
-    repository.mark_file_ready_for_upload(file_record_id)
+    destination_record = repository.set_file_destination_folder(file_record_id, selected)
+    ready_record = repository.mark_file_ready_for_upload(file_record_id)
     upload_worker = _get_upload_worker(context)
+    _get_logger(context).info(
+        "destination folder selected and upload queued",
+        extra={
+            "event": "destination_folder_selected",
+            "file_record_id": file_record_id,
+            "destination_folder_id": selected.id,
+            "destination_folder_path": selected.path,
+            "destination_drive_id": selected.drive_id,
+            "destination_is_shared": selected.is_shared,
+            "destination_status": destination_record.status if destination_record else None,
+            "ready_status": ready_record.status if ready_record else None,
+            "pending_uploads": repository.count_pending_uploads(),
+            "upload_worker_configured": upload_worker is not None,
+        },
+    )
     if upload_worker is not None:
         upload_worker.start()
     if user_record is not None:

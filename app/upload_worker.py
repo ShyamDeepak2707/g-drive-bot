@@ -176,8 +176,38 @@ class UploadWorker:
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
+            self._logger.info(
+                "upload worker start skipped because worker is already running",
+                extra={"event": "upload_worker_start_skipped"},
+            )
             return
         self._task = asyncio.create_task(self.run_until_idle(), name="upload-worker")
+        self._task.add_done_callback(self._log_worker_task_result)
+        self._logger.info("upload worker started", extra={"event": "upload_worker_started"})
+
+    def _log_worker_task_result(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            self._logger.info(
+                "upload worker task was cancelled",
+                extra={"event": "upload_worker_task_cancelled"},
+            )
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            self._logger.exception(
+                "upload worker task failed unexpectedly",
+                extra={
+                    "event": "upload_worker_task_failed",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        self._logger.info(
+            "upload worker task completed",
+            extra={"event": "upload_worker_task_completed"},
+        )
 
     async def stop(self) -> None:
         if self._task is None or self._task.done():
