@@ -218,6 +218,7 @@ Then edit `.env` with your own values. Do not commit `.env`, session files, OAut
 | `APP_ENV` | No | `development` | Runtime environment name. Production enables stricter Google credential validation. |
 | `LOG_LEVEL` | No | `INFO` | Logging level. |
 | `LOG_FILE` | No | `logs/app.log` | File log destination. |
+| `PORT` | No | Empty | Optional HTTP health port for Render Web Service deployments. |
 | `TELEGRAM_BOT_TOKEN` | Yes | None | Telegram Bot API token from BotFather. |
 | `TELEGRAM_ADMIN_USER_IDS` | Recommended | Empty | Comma-separated Telegram user IDs allowed to use admin-only commands. |
 | `PYROGRAM_API_ID` | Yes for startup validation | None | Telegram API ID for the Pyrogram user session. |
@@ -303,7 +304,9 @@ Compose mounts persistent runtime directories for `/data`, `/downloads`, `/temp`
 
 ## Cloud Deployment
 
-For platforms such as Render, use a Background Worker and attach a persistent disk mounted at `/data`. The app can materialize sensitive files from Base64 environment variables during startup:
+For Render, a Background Worker is the best fit because this is a polling Telegram bot. On Render's free plan, deploy it as a Web Service and set `PORT`; the app starts a tiny HTTP health server so Render can detect an open port while the bot continues polling Telegram.
+
+Attach a persistent disk mounted at `/data`. The app can materialize sensitive files from Base64 environment variables during startup:
 
 - `GOOGLE_CREDENTIALS_BASE64` writes `/data/credentials.json`.
 - `GOOGLE_TOKEN_BASE64` writes `/data/token.json`.
@@ -332,6 +335,7 @@ Configure Render environment variables:
 ```env
 APP_ENV=production
 LOG_FILE=/data/logs/app.log
+PORT=10000
 SQLITE_DB_PATH=/data/app.sqlite3
 DOWNLOADS_DIR=/data/downloads
 TEMP_DIR=/data/temp

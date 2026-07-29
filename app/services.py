@@ -22,6 +22,7 @@ from app.upload_worker import UploadWorker
 
 if TYPE_CHECKING:
     from app.pyrogram_client import PyrogramSessionManager
+    from app.render_health import RenderHealthServer
 
 T = TypeVar("T")
 
@@ -59,6 +60,7 @@ class ApplicationContainer:
     admin_command_service: AdminCommandService | None = None
     shutdown_controller: ShutdownController | None = None
     telegram_application: Application | None = None
+    render_health_server: RenderHealthServer | None = None
     registry: ServiceRegistry = field(default_factory=ServiceRegistry)
 
     def register_singletons(self) -> None:
@@ -91,3 +93,5 @@ class ApplicationContainer:
             self.registry.set("shutdown_controller", self.shutdown_controller)
         if self.telegram_application is not None:
             self.registry.set("telegram_application", self.telegram_application)
+        if self.render_health_server is not None:
+            self.registry.set("render_health_server", self.render_health_server)

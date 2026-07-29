@@ -18,6 +18,7 @@ from app.exceptions import StartupValidationError, TelegramError
 from app.health import HealthService
 from app.logging_config import configure_logging, get_logger
 from app.pyrogram_client import PyrogramSessionManager, create_pyrogram_client
+from app.render_health import RenderHealthServer, start_render_health_server_from_env
 from app.services import ApplicationContainer
 from app.shutdown_control import ShutdownController
 from app.startup_recovery import run_startup_recovery
@@ -37,7 +38,9 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
     logger.info("startup started", extra={"event": "startup_started"})
     if shutdown_controller is None:
         shutdown_controller = ShutdownController(logger=logger)
+    render_health_server: RenderHealthServer | None = None
     try:
+        render_health_server = await start_render_health_server_from_env(logger=logger)
         materialize_cloud_credentials(settings, logger=logger)
     except StartupValidationError as exc:
         logger.error(
@@ -49,6 +52,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
             },
         )
         logger.exception("startup validation failed", extra={"event": "startup_validation_failed"})
+        await _stop_render_health_server(render_health_server)
         raise
     cleanup_runtime_directory(settings.temp_dir, logger)
 
@@ -73,6 +77,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
     except Exception:
         logger.exception("startup validation failed", extra={"event": "startup_validation_failed"})
         await _stop_pyrogram(pyrogram_client)
+        await _stop_render_health_server(render_health_server)
         database.close()
         raise
 
@@ -166,6 +171,7 @@ async def startup(shutdown_controller: ShutdownController | None = None) -> Appl
         admin_command_service=admin_command_service,
         shutdown_controller=shutdown_controller,
         telegram_application=telegram_application,
+        render_health_server=render_health_server,
     )
     container.register_singletons()
     logger.info("startup completed", extra={"event": "startup_completed"})
@@ -195,6 +201,7 @@ async def shutdown(container: ApplicationContainer | None) -> None:
     await _stop_upload_worker(container.upload_worker)
     await _stop_telegram(container.telegram_application)
     await _stop_pyrogram(container.pyrogram_client)
+    await _stop_render_health_server(container.render_health_server)
     await container.task_manager.shutdown()
     container.database.close()
     cleanup_runtime_directory(container.settings.temp_dir, logger)
@@ -250,3 +257,9 @@ async def _stop_pyrogram(client: PyrogramSessionManager | None) -> None:
         return
     if client.is_running():
         await client.stop()
+
+
+async def _stop_render_health_server(server: RenderHealthServer | None) -> None:
+    if server is None:
+        return
+    await server.stop()
