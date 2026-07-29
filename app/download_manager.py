@@ -118,6 +118,9 @@ class DownloadManager:
                 "metadata_message_id": metadata.message_id,
                 "forward_origin_chat_id": metadata.forward_origin_chat_id,
                 "forward_origin_message_id": metadata.forward_origin_message_id,
+                "original_name": metadata.original_name,
+                "size": metadata.size,
+                "telegram_file_unique_id_present": metadata.telegram_file_unique_id is not None,
             },
         )
 
@@ -298,6 +301,9 @@ class DownloadManager:
                 "file_name": getattr(media, "file_name", None),
                 "file_size": expected_size,
                 "mime_type": getattr(media, "mime_type", None),
+                "resolved_file_unique_id_present": _message_media_unique_id(message, metadata)
+                is not None,
+                "telegram_file_unique_id_present": metadata.telegram_file_unique_id is not None,
             },
         )
         download_started_at = time.perf_counter()
@@ -448,6 +454,9 @@ class DownloadManager:
                     "resolved_file_name": _message_media_file_name(message, metadata),
                     "expected_size": metadata.size,
                     "resolved_size": _message_media_size(message, metadata),
+                    "expected_unique_id_present": metadata.telegram_file_unique_id is not None,
+                    "resolved_unique_id_present": _message_media_unique_id(message, metadata)
+                    is not None,
                     "detected_media_type": detected_media_type,
                 },
             )
@@ -469,6 +478,8 @@ class DownloadManager:
                     "detected_media_type": detected_media_type,
                     "file_name": _message_media_file_name(message, metadata),
                     "file_size": _message_media_size(message, metadata),
+                    "resolved_file_unique_id_present": _message_media_unique_id(message, metadata)
+                    is not None,
                 },
             )
 
@@ -495,6 +506,9 @@ class DownloadManager:
                 "file_name": getattr(media, "file_name", None),
                 "file_size": expected_size,
                 "mime_type": getattr(media, "mime_type", None),
+                "resolved_file_unique_id_present": _message_media_unique_id(message, metadata)
+                is not None,
+                "telegram_file_unique_id_present": metadata.telegram_file_unique_id is not None,
             },
         )
         download_started_at = time.perf_counter()
@@ -581,6 +595,10 @@ class DownloadManager:
                             "resolved_message_id": getattr(candidate, "id", None),
                             "file_name": _message_media_file_name(candidate, metadata),
                             "file_size": _message_media_size(candidate, metadata),
+                            "resolved_file_unique_id_present": _message_media_unique_id(
+                                candidate, metadata
+                            )
+                            is not None,
                         },
                     )
                     return candidate
@@ -603,6 +621,10 @@ class DownloadManager:
                             "resolved_message_id": getattr(candidate, "id", None),
                             "file_name": _message_media_file_name(candidate, metadata),
                             "file_size": _message_media_size(candidate, metadata),
+                            "resolved_file_unique_id_present": _message_media_unique_id(
+                                candidate, metadata
+                            )
+                            is not None,
                         },
                     )
                     return candidate
@@ -615,6 +637,7 @@ class DownloadManager:
                 "bot_dialog_peer": bot_peer,
                 "expected_file_name": metadata.original_name,
                 "expected_size": metadata.size,
+                "expected_unique_id_present": metadata.telegram_file_unique_id is not None,
                 "file_type": metadata.file_type.value,
                 "scanned": searched,
             },
@@ -815,6 +838,12 @@ def _message_matches_metadata(message: object, metadata: FileMetadata) -> bool:
     media = getattr(message, metadata.file_type.value, None)
     if media is None:
         return False
+    resolved_unique_id = getattr(media, "file_unique_id", None)
+    if metadata.telegram_file_unique_id is not None and (
+        not isinstance(resolved_unique_id, str)
+        or resolved_unique_id != metadata.telegram_file_unique_id
+    ):
+        return False
     resolved_size = getattr(media, "file_size", None)
     if metadata.size is not None and resolved_size is not None and resolved_size != metadata.size:
         return False
@@ -835,6 +864,14 @@ def _message_media_size(message: object, metadata: FileMetadata) -> int | None:
         return None
     size = getattr(media, "file_size", None)
     return size if isinstance(size, int) else None
+
+
+def _message_media_unique_id(message: object, metadata: FileMetadata) -> str | None:
+    media = getattr(message, metadata.file_type.value, None)
+    if media is None:
+        return None
+    file_unique_id = getattr(media, "file_unique_id", None)
+    return file_unique_id if isinstance(file_unique_id, str) else None
 
 
 def _message_media_file_name(message: object, metadata: FileMetadata) -> str | None:

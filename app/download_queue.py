@@ -636,6 +636,7 @@ def _metadata_from_file_record(file_record: FileRecord) -> FileMetadata | None:
         extension=file_record.extension,
         file_type=file_type,
         created_at=file_record.created_at,
+        telegram_file_unique_id=file_record.telegram_file_unique_id,
     )
 
 

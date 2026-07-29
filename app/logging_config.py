@@ -26,6 +26,18 @@ _CONSOLE_EXTRA_KEYS = (
     "metadata_chat_id",
     "metadata_message_id",
     "file_type",
+    "original_name",
+    "size",
+    "file_name",
+    "file_size",
+    "expected_file_name",
+    "resolved_file_name",
+    "expected_size",
+    "resolved_size",
+    "telegram_file_unique_id_present",
+    "expected_unique_id_present",
+    "resolved_unique_id_present",
+    "resolved_file_unique_id_present",
 )
 
 

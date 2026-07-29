@@ -40,9 +40,11 @@ def test_database_initialization_and_repository(tmp_path: Path) -> None:
             extension=".txt",
             file_type=TelegramFileType.DOCUMENT,
             created_at="2026-07-24T00:00:00+00:00",
+            telegram_file_unique_id="unique-file-id",
         ),
     )
     assert file_record.status == FILE_STATUS_RECEIVED
+    assert file_record.telegram_file_unique_id == "unique-file-id"
     assert file_record.message_id == 456
     assert file_record.forward_origin_chat_id == -100123
     assert file_record.forward_origin_message_id == 99

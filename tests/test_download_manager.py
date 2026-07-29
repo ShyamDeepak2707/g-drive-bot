@@ -62,10 +62,13 @@ class FakePyrogramMessage:
         chat_id: int,
         has_media: bool = True,
         document_size: int = 5,
+        document_unique_id: str = "unique-file-id",
     ) -> None:
         self.id = message_id
         self.chat = FakePyrogramChat(chat_id)
-        self.document = FakePyrogramDocument(document_size) if has_media else None
+        self.document = (
+            FakePyrogramDocument(document_size, document_unique_id) if has_media else None
+        )
         self.video = None
         self.audio = None
         self.photo = None
@@ -87,8 +90,9 @@ class FakePyrogramDocument:
     file_name = "example.txt"
     mime_type = "text/plain"
 
-    def __init__(self, file_size: int = 5) -> None:
+    def __init__(self, file_size: int = 5, file_unique_id: str = "unique-file-id") -> None:
         self.file_size = file_size
+        self.file_unique_id = file_unique_id
 
 
 class FakePyrogramDialog:
@@ -103,6 +107,7 @@ class FakePyrogramClient:
         has_media: bool = True,
         resolved_chat_id: int | None = None,
         document_size: int = 5,
+        document_unique_id: str = "unique-file-id",
         downloaded_bytes: bytes = b"hello",
         search_messages: list[FakePyrogramMessage] | None = None,
         chat_history: list[FakePyrogramMessage] | None = None,
@@ -110,6 +115,7 @@ class FakePyrogramClient:
         self.has_media = has_media
         self.resolved_chat_id = resolved_chat_id
         self.document_size = document_size
+        self.document_unique_id = document_unique_id
         self.downloaded_bytes = downloaded_bytes
         self.search_message_results = search_messages or []
         self.chat_history_results = chat_history or []
@@ -145,6 +151,7 @@ class FakePyrogramClient:
             self.resolved_chat_id if self.resolved_chat_id is not None else default_chat_id,
             has_media=self.has_media,
             document_size=self.document_size,
+            document_unique_id=self.document_unique_id,
         )
 
     async def search_messages(
@@ -369,6 +376,47 @@ def test_download_manager_searches_bot_dialog_when_direct_message_size_differs(
     )
     assert mismatch.__dict__["resolved_size"] == 303 * 1024 * 1024
     assert resolved.__dict__["resolved_message_id"] == 777
+    assert client.search_messages_calls == 1
+    assert client.downloaded_message is matching_message
+    assert bot.requested_file_id is None
+    assert result.path.read_bytes() == b"hello"
+
+
+def test_download_manager_searches_bot_dialog_when_direct_message_unique_id_differs(
+    tmp_path: Path,
+) -> None:
+    matching_message = FakePyrogramMessage(
+        message_id=778,
+        chat_id=1846101730,
+        document_size=5,
+        document_unique_id="expected-unique-id",
+    )
+    client = FakePyrogramClient(
+        resolved_chat_id=1846101730,
+        document_size=5,
+        document_unique_id="wrong-unique-id",
+        search_messages=[matching_message],
+    )
+    bot = FakeBotApiClient()
+    session = FakePyrogramSession(client)
+    manager = DownloadManager(
+        bot=bot,
+        pyrogram_session=session,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    result = asyncio.run(
+        manager.download(
+            file_record_id=1,
+            metadata=_metadata(
+                message_id=214,
+                telegram_file_unique_id="expected-unique-id",
+            ),
+        )
+    )
+
     assert client.search_messages_calls == 1
     assert client.downloaded_message is matching_message
     assert bot.requested_file_id is None
@@ -666,6 +714,7 @@ def _metadata(
     message_id: int = 1,
     forward_origin_chat_id: int | None = None,
     forward_origin_message_id: int | None = None,
+    telegram_file_unique_id: str | None = None,
 ) -> FileMetadata:
     return FileMetadata(
         telegram_file_id="bot-api-file-id",
@@ -679,4 +728,5 @@ def _metadata(
         extension=".txt",
         file_type=TelegramFileType.DOCUMENT,
         created_at="2026-07-24T00:00:00+00:00",
+        telegram_file_unique_id=telegram_file_unique_id,
     )

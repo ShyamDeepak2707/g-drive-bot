@@ -550,6 +550,7 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "file_type": metadata.file_type.value,
             "original_name": metadata.original_name,
             "size": metadata.size,
+            "telegram_file_unique_id_present": metadata.telegram_file_unique_id is not None,
         },
     )
 
@@ -1702,6 +1703,7 @@ def _shorten(value: str, limit: int = 34) -> str:
 def _extract_file_metadata(message: Message) -> FileMetadata | None:
     file_type: TelegramFileType
     telegram_file_id: str
+    telegram_file_unique_id: str | None
     original_name: str | None = None
     mime_type: str | None = None
     size: int | None = None
@@ -1709,18 +1711,21 @@ def _extract_file_metadata(message: Message) -> FileMetadata | None:
     if message.document is not None:
         file_type = TelegramFileType.DOCUMENT
         telegram_file_id = message.document.file_id
+        telegram_file_unique_id = getattr(message.document, "file_unique_id", None)
         original_name = message.document.file_name
         mime_type = message.document.mime_type
         size = message.document.file_size
     elif message.video is not None:
         file_type = TelegramFileType.VIDEO
         telegram_file_id = message.video.file_id
+        telegram_file_unique_id = getattr(message.video, "file_unique_id", None)
         original_name = message.video.file_name
         mime_type = message.video.mime_type
         size = message.video.file_size
     elif message.audio is not None:
         file_type = TelegramFileType.AUDIO
         telegram_file_id = message.audio.file_id
+        telegram_file_unique_id = getattr(message.audio, "file_unique_id", None)
         original_name = message.audio.file_name
         mime_type = message.audio.mime_type
         size = message.audio.file_size
@@ -1728,18 +1733,21 @@ def _extract_file_metadata(message: Message) -> FileMetadata | None:
         file_type = TelegramFileType.PHOTO
         photo = message.photo[-1]
         telegram_file_id = photo.file_id
+        telegram_file_unique_id = getattr(photo, "file_unique_id", None)
         original_name = f"photo-{message.message_id}.jpg"
         mime_type = "image/jpeg"
         size = photo.file_size
     elif message.animation is not None:
         file_type = TelegramFileType.ANIMATION
         telegram_file_id = message.animation.file_id
+        telegram_file_unique_id = getattr(message.animation, "file_unique_id", None)
         original_name = message.animation.file_name
         mime_type = message.animation.mime_type
         size = message.animation.file_size
     elif message.voice is not None:
         file_type = TelegramFileType.VOICE
         telegram_file_id = message.voice.file_id
+        telegram_file_unique_id = getattr(message.voice, "file_unique_id", None)
         original_name = f"voice-{message.message_id}.ogg"
         mime_type = message.voice.mime_type
         size = message.voice.file_size
@@ -1760,6 +1768,7 @@ def _extract_file_metadata(message: Message) -> FileMetadata | None:
         extension=extension,
         file_type=file_type,
         created_at=utc_now_iso(),
+        telegram_file_unique_id=telegram_file_unique_id,
     )
 
 
@@ -1809,6 +1818,7 @@ def _incoming_file_download_diagnostics(
         "file_type": metadata.file_type.value,
         "original_name": metadata.original_name,
         "size": metadata.size,
+        "telegram_file_unique_id_present": metadata.telegram_file_unique_id is not None,
     }
 
 
