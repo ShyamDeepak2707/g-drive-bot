@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.constants import (
+    FILE_STATUS_AWAITING_FOLDER,
     FILE_STATUS_COMPLETED,
     FILE_STATUS_QUEUED,
     FILE_STATUS_RECEIVED,
@@ -134,3 +135,45 @@ def test_repository_upload_state_transitions_are_persisted(tmp_path: Path) -> No
     assert completed.google_drive_file_id == "drive-file-id"
 
     database.close()
+
+
+def test_repository_finds_older_incomplete_file(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=123, username=None, first_name=None)
+    older = repository.create_file_record(
+        user_id=user.id,
+        metadata=_metadata(message_id=1),
+    )
+    newer = repository.create_file_record(
+        user_id=user.id,
+        metadata=_metadata(message_id=2),
+    )
+    repository.update_file_status(older.id, FILE_STATUS_AWAITING_FOLDER)
+
+    blocking = repository.get_oldest_incomplete_file_before(newer.id)
+
+    assert blocking is not None
+    assert blocking.id == older.id
+
+    repository.mark_file_completed(older.id, "drive-file-id")
+
+    assert repository.get_oldest_incomplete_file_before(newer.id) is None
+    database.close()
+
+
+def _metadata(message_id: int) -> FileMetadata:
+    return FileMetadata(
+        telegram_file_id=f"telegram-file-id-{message_id}",
+        message_id=message_id,
+        chat_id=789,
+        forward_origin_chat_id=None,
+        forward_origin_message_id=None,
+        original_name=f"example-{message_id}.txt",
+        mime_type="text/plain",
+        size=12,
+        extension=".txt",
+        file_type=TelegramFileType.DOCUMENT,
+        created_at="2026-07-24T00:00:00+00:00",
+    )

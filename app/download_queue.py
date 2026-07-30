@@ -290,6 +290,21 @@ class DownloadQueue:
                 await self._promote_latest_active_message(job.chat_id)
                 return
 
+            await self._wait_for_older_files(job)
+            if job.cancel_event.is_set():
+                job.status = DownloadJobStatus.CANCELLED
+                self._repository.mark_download_cancelled(
+                    job.file_record_id,
+                    job.attempts,
+                )
+                await self._safe_edit_message(
+                    chat_id=job.chat_id,
+                    message_id=job.status_message_id,
+                    text="Download cancelled.",
+                )
+                await self._promote_latest_active_message(job.chat_id)
+                return
+
             job.attempts += 1
             job.status = DownloadJobStatus.RUNNING
             self._repository.mark_file_downloading(job.file_record_id)
@@ -596,6 +611,41 @@ class DownloadQueue:
             text=f"Downloaded {filename}.\nRename it, then choose a destination folder.",
             reply_markup=keyboard,
         )
+
+    async def _wait_for_older_files(self, job: DownloadJob) -> None:
+        waiting_message_sent = False
+        while not job.cancel_event.is_set():
+            blocking_file = self._repository.get_oldest_incomplete_file_before(job.file_record_id)
+            if blocking_file is None:
+                if waiting_message_sent:
+                    self._logger.info(
+                        "download no longer blocked by older jobs",
+                        extra={
+                            "event": "download_fifo_wait_finished",
+                            "file_record_id": job.file_record_id,
+                        },
+                    )
+                return
+            if not waiting_message_sent:
+                waiting_message_sent = True
+                self._logger.info(
+                    "download waiting for older file lifecycle to finish",
+                    extra={
+                        "event": "download_fifo_waiting",
+                        "file_record_id": job.file_record_id,
+                        "blocking_file_record_id": blocking_file.id,
+                        "blocking_status": blocking_file.status,
+                    },
+                )
+                await self._safe_edit_message(
+                    chat_id=job.chat_id,
+                    message_id=job.status_message_id,
+                    text=(
+                        "Waiting for the previous file to finish uploading before "
+                        "this download starts."
+                    ),
+                )
+            await _sleep_or_cancel(job.cancel_event, 2.0)
 
     async def _safe_edit_message(
         self,

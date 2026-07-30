@@ -134,6 +134,27 @@ class UnexpectedAlwaysFailingDownloadManager:
         raise RuntimeError("worker crashed")
 
 
+class RecordingDownloadManager:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def download(
+        self,
+        file_record_id: int,
+        metadata: FileMetadata,
+        progress_callback: object | None = None,
+    ) -> DownloadResult:
+        self.calls += 1
+        path = Path(f"downloads/{file_record_id}.txt")
+        return DownloadResult(
+            file_record_id=file_record_id,
+            metadata=metadata,
+            path=path,
+            filename=path.name,
+            size=metadata.size,
+        )
+
+
 class CancellableDownloadManager:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -447,6 +468,51 @@ def test_download_queue_marks_unexpected_failure_visible_and_failed(tmp_path: Pa
     assert download is not None
     assert download.error_message == "worker crashed"
     assert any("Download failed: worker crashed" in edit for edit in bot.edits)
+
+
+def test_download_queue_waits_for_older_incomplete_file_before_starting(
+    tmp_path: Path,
+) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=1, username=None, first_name=None)
+    older = repository.create_file_record(user_id=user.id, metadata=_metadata(message_id=1))
+    newer_metadata = _metadata(message_id=2)
+    newer = repository.create_file_record(user_id=user.id, metadata=newer_metadata)
+    repository.mark_file_ready_for_upload(older.id)
+    manager = RecordingDownloadManager()
+    bot = FakeBot()
+    queue = DownloadQueue(
+        repository=repository,
+        download_manager=cast(object, manager),  # type: ignore[arg-type]
+        bot=cast(Bot, bot),
+        logger=logging.getLogger("test"),
+        retry_backoff_base_seconds=0,
+    )
+
+    async def run_queue() -> None:
+        queue.start()
+        await queue.enqueue(
+            DownloadJob(
+                file_record_id=newer.id,
+                metadata=newer_metadata,
+                chat_id=newer_metadata.chat_id,
+                status_message_id=99,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert manager.calls == 0
+        assert any("Waiting for the previous file" in edit for edit in bot.edits)
+        repository.mark_file_completed(older.id, "older-drive-file")
+        await asyncio.wait_for(queue._queue.join(), timeout=3)  # noqa: SLF001
+        await queue.stop()
+
+    asyncio.run(run_queue())
+
+    assert manager.calls == 1
+    assert queue.status(newer.id) == DownloadJobStatus.COMPLETED
+    database.close()
 
 
 def test_download_queue_uses_capped_exponential_retry_delay() -> None:

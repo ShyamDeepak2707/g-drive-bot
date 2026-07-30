@@ -233,6 +233,26 @@ class DatabaseRepository:
             return None
         return _file_record_from_row(row)
 
+    def get_oldest_incomplete_file_before(self, file_id: int) -> FileRecord | None:
+        row = self._database.fetch_one(
+            _FILE_SELECT_SQL + """
+            WHERE id < ?
+              AND status NOT IN (?, ?, ?, ?)
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (
+                file_id,
+                FILE_STATUS_COMPLETED,
+                FILE_STATUS_FAILED,
+                FILE_STATUS_CANCELLED,
+                FILE_STATUS_SKIPPED,
+            ),
+        )
+        if row is None:
+            return None
+        return _file_record_from_row(row)
+
     def get_next_ready_for_upload(
         self,
         excluded_file_ids: set[int] | None = None,
