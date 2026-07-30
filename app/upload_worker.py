@@ -5,7 +5,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +18,7 @@ from app.database import DatabaseRepository, FileRecord
 from app.job_state import InvalidJobStateTransition, JobState, should_start_upload
 from app.progress import ProgressSnapshot, format_bytes, format_duration
 from app.task_messages import ActiveTaskMessageRegistry, TaskMessageKey
+from app.transfer_coordinator import TransferCoordinator
 from app.ui.messages import TelegramMessage, error_card, progress_card, warning_card
 
 UploadProgressCallback = Callable[[ProgressSnapshot], None]
@@ -210,6 +211,7 @@ class UploadWorker:
         retry_backoff_base_seconds: float = constants.UPLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.UPLOAD_RETRY_MAX_DELAY_SECONDS,
         task_message_registry: ActiveTaskMessageRegistry | None = None,
+        transfer_coordinator: TransferCoordinator | None = None,
     ) -> None:
         self._repository = repository
         self._logger = logger
@@ -221,6 +223,7 @@ class UploadWorker:
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
         self._task_message_registry = task_message_registry
+        self._transfer_coordinator = transfer_coordinator
         self._current_file_record: FileRecord | None = None
         self._current_progress: ProgressSnapshot | None = None
         self._cancelled_file_ids: set[int] = set()
@@ -502,25 +505,30 @@ class UploadWorker:
             progress_task: asyncio.Task[_UploadStatusTarget | None] | None = None
             upload_input = self._resolve_upload_input(updated)
             progress_state = _UploadProgressState()
-            progress_task = asyncio.create_task(
-                self._send_and_flush_upload_progress(updated, upload_input, progress_state),
-                name=f"upload-progress-{updated.id}",
-            )
-            loop = asyncio.get_running_loop()
-
-            def progress_callback(snapshot: ProgressSnapshot) -> None:
-                loop.call_soon_threadsafe(
-                    self._record_upload_progress,
-                    updated.id,
-                    progress_state,
-                    snapshot,
+            async with _transfer_slot(
+                self._transfer_coordinator,
+                transfer_type="upload",
+                file_record_id=updated.id,
+            ):
+                progress_task = asyncio.create_task(
+                    self._send_and_flush_upload_progress(updated, upload_input, progress_state),
+                    name=f"upload-progress-{updated.id}",
                 )
+                loop = asyncio.get_running_loop()
 
-            uploaded_file = await asyncio.to_thread(
-                self._upload,
-                upload_input,
-                progress_callback,
-            )
+                def progress_callback(snapshot: ProgressSnapshot) -> None:
+                    loop.call_soon_threadsafe(
+                        self._record_upload_progress,
+                        updated.id,
+                        progress_state,
+                        snapshot,
+                    )
+
+                uploaded_file = await asyncio.to_thread(
+                    self._upload,
+                    upload_input,
+                    progress_callback,
+                )
             if self._is_cancel_requested(updated.id):
                 upload_target = await _stop_progress_task(progress_task)
                 if upload_target is not None:
@@ -1376,6 +1384,23 @@ async def _stop_progress_task(
         return await task
     except asyncio.CancelledError:
         return None
+
+
+@contextlib.asynccontextmanager
+async def _transfer_slot(
+    transfer_coordinator: TransferCoordinator | None,
+    *,
+    transfer_type: str,
+    file_record_id: int,
+) -> AsyncIterator[None]:
+    if transfer_coordinator is None:
+        yield
+        return
+    async with transfer_coordinator.acquire(
+        transfer_type=transfer_type,
+        file_record_id=file_record_id,
+    ):
+        yield
 
 
 def _classify_upload_failure(exc: Exception) -> _UploadFailureClassification:

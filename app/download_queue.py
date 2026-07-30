@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -15,6 +17,7 @@ from app.exceptions import DownloadError
 from app.models import DownloadResult, FileMetadata, TelegramFileType
 from app.progress import ProgressSnapshot, format_bytes, format_duration
 from app.task_messages import ActiveTaskMessageRegistry, TaskMessageKey
+from app.transfer_coordinator import TransferCoordinator
 from app.ui import TelegramMessage, progress_card
 
 
@@ -71,6 +74,7 @@ class DownloadQueue:
         retry_backoff_base_seconds: float = constants.DOWNLOAD_RETRY_BASE_DELAY_SECONDS,
         retry_backoff_max_seconds: float = constants.DOWNLOAD_RETRY_MAX_DELAY_SECONDS,
         task_message_registry: ActiveTaskMessageRegistry | None = None,
+        transfer_coordinator: TransferCoordinator | None = None,
     ) -> None:
         self._repository = repository
         self._download_manager = download_manager
@@ -81,6 +85,7 @@ class DownloadQueue:
         self._retry_backoff_base_seconds = retry_backoff_base_seconds
         self._retry_backoff_max_seconds = retry_backoff_max_seconds
         self._task_message_registry = task_message_registry
+        self._transfer_coordinator = transfer_coordinator
         self._queue: asyncio.Queue[DownloadJob] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._jobs: dict[int, DownloadJob] = {}
@@ -323,34 +328,40 @@ class DownloadQueue:
 
             progress_task: asyncio.Task[None] | None = None
             try:
-                self._logger.info(
-                    "download started",
-                    extra={
-                        "event": "download_job_started",
-                        "file_record_id": job.file_record_id,
-                        "attempt": job.attempts,
-                    },
-                )
-                started_message = _download_started_message(job)
-                await self._safe_edit_message(
-                    chat_id=job.chat_id,
-                    message_id=job.status_message_id,
-                    message=started_message,
-                )
-                self._register_task_message(job, started_message)
-                progress_task = asyncio.create_task(
-                    flush_progress(),
-                    name=f"download-progress-{job.file_record_id}",
-                )
-                job.active_task = asyncio.create_task(
-                    self._download_manager.download(
-                        file_record_id=job.file_record_id,
-                        metadata=job.metadata,
-                        progress_callback=progress,
-                    ),
-                    name=f"download-{job.file_record_id}",
-                )
-                result = await job.active_task
+                async with _transfer_slot(
+                    self._transfer_coordinator,
+                    transfer_type="download",
+                    file_record_id=job.file_record_id,
+                    cancellation_check=job.cancel_event.is_set,
+                ):
+                    self._logger.info(
+                        "download started",
+                        extra={
+                            "event": "download_job_started",
+                            "file_record_id": job.file_record_id,
+                            "attempt": job.attempts,
+                        },
+                    )
+                    started_message = _download_started_message(job)
+                    await self._safe_edit_message(
+                        chat_id=job.chat_id,
+                        message_id=job.status_message_id,
+                        message=started_message,
+                    )
+                    self._register_task_message(job, started_message)
+                    progress_task = asyncio.create_task(
+                        flush_progress(),
+                        name=f"download-progress-{job.file_record_id}",
+                    )
+                    job.active_task = asyncio.create_task(
+                        self._download_manager.download(
+                            file_record_id=job.file_record_id,
+                            metadata=job.metadata,
+                            progress_callback=progress,
+                        ),
+                        name=f"download-{job.file_record_id}",
+                    )
+                    result = await job.active_task
                 job.active_task = None
                 await _stop_progress_task(progress_task)
                 progress_task = None
@@ -746,6 +757,25 @@ async def _sleep_or_cancel(cancel_event: asyncio.Event, delay_seconds: float) ->
         await asyncio.wait_for(cancel_event.wait(), timeout=delay_seconds)
     except TimeoutError:
         return
+
+
+@contextlib.asynccontextmanager
+async def _transfer_slot(
+    transfer_coordinator: TransferCoordinator | None,
+    *,
+    transfer_type: str,
+    file_record_id: int,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> AsyncIterator[None]:
+    if transfer_coordinator is None:
+        yield
+        return
+    async with transfer_coordinator.acquire(
+        transfer_type=transfer_type,
+        file_record_id=file_record_id,
+        cancellation_check=cancellation_check,
+    ):
+        yield
 
 
 def _metadata_from_file_record(file_record: FileRecord) -> FileMetadata | None:
