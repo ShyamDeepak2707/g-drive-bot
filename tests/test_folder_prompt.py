@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from app.models import Folder
-from app.telegram_bot import DESTINATION_PROMPT_RECENT_LIMIT, _unique_recent_prompt_folders
+from app.telegram_bot import _unique_recent_prompt_folders
 
 
-def test_unique_recent_prompt_folders_excludes_last_and_limits_to_three() -> None:
+def test_unique_recent_prompt_folders_excludes_last_and_uses_available_slots() -> None:
     last = _folder("last", "Last")
     recent = [
         last,
@@ -14,10 +14,9 @@ def test_unique_recent_prompt_folders_excludes_last_and_limits_to_three() -> Non
         _folder("four", "Four"),
     ]
 
-    folders = _unique_recent_prompt_folders(recent, last)
+    folders = _unique_recent_prompt_folders(recent, last, max_count=2)
 
-    assert [folder.id for folder in folders] == ["one", "two", "three"]
-    assert len(folders) == DESTINATION_PROMPT_RECENT_LIMIT
+    assert [folder.id for folder in folders] == ["one", "two"]
 
 
 def test_unique_recent_prompt_folders_deduplicates_recent_entries() -> None:
@@ -30,6 +29,16 @@ def test_unique_recent_prompt_folders_deduplicates_recent_entries() -> None:
     folders = _unique_recent_prompt_folders(recent, last_folder=None)
 
     assert [folder.id for folder in folders] == ["one", "two"]
+
+
+def test_unique_recent_prompt_folders_returns_none_when_no_slots_available() -> None:
+    folders = _unique_recent_prompt_folders(
+        [_folder("one", "One")],
+        last_folder=_folder("last", "Last"),
+        max_count=0,
+    )
+
+    assert folders == ()
 
 
 def _folder(folder_id: str, name: str) -> Folder:

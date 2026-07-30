@@ -950,7 +950,7 @@ async def _send_destination_entry_prompt(
     recent_folders = (
         repository.list_recent_folders(
             user_record.id,
-            min(_get_folder_recent_limit(context), DESTINATION_PROMPT_RECENT_LIMIT + 1),
+            max(_get_folder_recent_limit(context), DESTINATION_PROMPT_RECENT_LIMIT),
         )
         if user_record
         else []
@@ -971,7 +971,12 @@ async def _send_destination_entry_prompt(
                 )
             ]
         )
-    for folder in _unique_recent_prompt_folders(recent_folders, last_folder):
+    recent_prompt_limit = DESTINATION_PROMPT_RECENT_LIMIT - (1 if last_folder is not None else 0)
+    for folder in _unique_recent_prompt_folders(
+        recent_folders,
+        last_folder,
+        max_count=recent_prompt_limit,
+    ):
         token = _remember_folder_token(context, folder)
         rows.append(
             [
@@ -1783,15 +1788,18 @@ def _folder_from_token(context: ContextTypes.DEFAULT_TYPE, token: str) -> Folder
 def _unique_recent_prompt_folders(
     recent_folders: list[Folder],
     last_folder: Folder | None,
+    max_count: int = DESTINATION_PROMPT_RECENT_LIMIT,
 ) -> tuple[Folder, ...]:
     folders: list[Folder] = []
     seen_ids: set[str] = {last_folder.id} if last_folder is not None else set()
+    if max_count <= 0:
+        return ()
     for folder in recent_folders:
         if folder.id in seen_ids:
             continue
         seen_ids.add(folder.id)
         folders.append(folder)
-        if len(folders) >= DESTINATION_PROMPT_RECENT_LIMIT:
+        if len(folders) >= max_count:
             break
     return tuple(folders)
 

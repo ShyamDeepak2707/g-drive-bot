@@ -101,6 +101,39 @@ class FailingOnceDownloadManager:
         )
 
 
+class UnexpectedFailingOnceDownloadManager:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def download(
+        self,
+        file_record_id: int,
+        metadata: FileMetadata,
+        progress_callback: object | None = None,
+    ) -> DownloadResult:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("connection reset")
+        path = Path("downloads/retried-unexpected.txt")
+        return DownloadResult(
+            file_record_id=file_record_id,
+            metadata=metadata,
+            path=path,
+            filename=path.name,
+            size=metadata.size,
+        )
+
+
+class UnexpectedAlwaysFailingDownloadManager:
+    async def download(
+        self,
+        file_record_id: int,
+        metadata: FileMetadata,
+        progress_callback: object | None = None,
+    ) -> DownloadResult:
+        raise RuntimeError("worker crashed")
+
+
 class CancellableDownloadManager:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -338,6 +371,82 @@ def test_download_queue_retries_after_failure(tmp_path: Path) -> None:
     assert manager.calls == 2
     assert queue.status(file_record.id) == DownloadJobStatus.COMPLETED
     assert queue.snapshot().completed_since_startup == 1
+
+
+def test_download_queue_retries_after_unexpected_failure(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=1, username=None, first_name=None)
+    metadata = _metadata()
+    file_record = repository.create_file_record(user_id=user.id, metadata=metadata)
+    manager = UnexpectedFailingOnceDownloadManager()
+    queue = DownloadQueue(
+        repository=repository,
+        download_manager=cast(object, manager),  # type: ignore[arg-type]
+        bot=cast(Bot, FakeBot()),
+        logger=logging.getLogger("test"),
+        retry_limit=1,
+        retry_backoff_base_seconds=0,
+    )
+
+    async def run_queue() -> None:
+        queue.start()
+        await queue.enqueue(
+            DownloadJob(
+                file_record_id=file_record.id,
+                metadata=metadata,
+                chat_id=metadata.chat_id,
+                status_message_id=99,
+            )
+        )
+        await asyncio.wait_for(queue._queue.join(), timeout=3)  # noqa: SLF001
+        await queue.stop()
+
+    asyncio.run(run_queue())
+
+    assert manager.calls == 2
+    assert queue.status(file_record.id) == DownloadJobStatus.COMPLETED
+    assert queue.snapshot().completed_since_startup == 1
+
+
+def test_download_queue_marks_unexpected_failure_visible_and_failed(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    user = repository.create_user(telegram_user_id=1, username=None, first_name=None)
+    metadata = _metadata()
+    file_record = repository.create_file_record(user_id=user.id, metadata=metadata)
+    bot = FakeBot()
+    queue = DownloadQueue(
+        repository=repository,
+        download_manager=cast(object, UnexpectedAlwaysFailingDownloadManager()),  # type: ignore[arg-type]
+        bot=cast(Bot, bot),
+        logger=logging.getLogger("test"),
+        retry_limit=0,
+    )
+
+    async def run_queue() -> None:
+        queue.start()
+        await queue.enqueue(
+            DownloadJob(
+                file_record_id=file_record.id,
+                metadata=metadata,
+                chat_id=metadata.chat_id,
+                status_message_id=99,
+            )
+        )
+        await asyncio.wait_for(queue._queue.join(), timeout=3)  # noqa: SLF001
+        await queue.stop()
+
+    asyncio.run(run_queue())
+
+    assert queue.status(file_record.id) == DownloadJobStatus.FAILED
+    assert queue.snapshot().failed_since_startup == 1
+    download = repository.get_download(file_record.id)
+    assert download is not None
+    assert download.error_message == "worker crashed"
+    assert any("Download failed: worker crashed" in edit for edit in bot.edits)
 
 
 def test_download_queue_uses_capped_exponential_retry_delay() -> None:

@@ -450,7 +450,7 @@ class DownloadQueue:
                     await self._safe_edit_message(
                         chat_id=job.chat_id,
                         message_id=job.status_message_id,
-                        text=f"Download failed: {exc}",
+                        text=_download_failed_text(exc),
                     )
                     await self._promote_latest_active_message(job.chat_id)
                     return
@@ -467,6 +467,81 @@ class DownloadQueue:
                             self._retry_backoff_max_seconds,
                         ),
                         "error": str(exc),
+                    },
+                )
+                await _sleep_or_cancel(
+                    job.cancel_event,
+                    _retry_delay(
+                        job.attempts,
+                        self._retry_backoff_base_seconds,
+                        self._retry_backoff_max_seconds,
+                    ),
+                )
+            except Exception as exc:
+                job.active_task = None
+                await _stop_progress_task(progress_task)
+                if job.cancel_event.is_set():
+                    job.status = DownloadJobStatus.CANCELLED
+                    self._repository.mark_download_cancelled(
+                        job.file_record_id,
+                        job.attempts,
+                    )
+                    self._unregister_task_message(job)
+                    await self._safe_edit_message(
+                        chat_id=job.chat_id,
+                        message_id=job.status_message_id,
+                        text="Download cancelled.",
+                    )
+                    await self._promote_latest_active_message(job.chat_id)
+                    self._logger.info(
+                        "download cancelled",
+                        extra={
+                            "event": "download_job_cancelled",
+                            "file_record_id": job.file_record_id,
+                            "attempt": job.attempts,
+                        },
+                    )
+                    return
+                self._logger.exception(
+                    "download attempt failed unexpectedly",
+                    extra={
+                        "event": "download_unexpected_failed",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                if job.attempts > self._retry_limit:
+                    job.status = DownloadJobStatus.FAILED
+                    self._repository.mark_download_failed(
+                        job.file_record_id,
+                        str(exc),
+                        job.attempts,
+                    )
+                    self._failed_since_startup += 1
+                    self._unregister_task_message(job)
+                    await self._safe_edit_message(
+                        chat_id=job.chat_id,
+                        message_id=job.status_message_id,
+                        text=_download_failed_text(exc),
+                    )
+                    await self._promote_latest_active_message(job.chat_id)
+                    return
+                self._logger.info(
+                    "retrying download after unexpected failure",
+                    extra={
+                        "event": "download_unexpected_retry",
+                        "file_record_id": job.file_record_id,
+                        "attempt": job.attempts,
+                        "next_attempt": job.attempts + 1,
+                        "delay_seconds": _retry_delay(
+                            job.attempts,
+                            self._retry_backoff_base_seconds,
+                            self._retry_backoff_max_seconds,
+                        ),
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
                     },
                 )
                 await _sleep_or_cancel(
@@ -596,6 +671,10 @@ def _rename_callback(action: str, file_record_id: int) -> str:
 
 def _download_task_message_key(file_record_id: int) -> TaskMessageKey:
     return ("download", file_record_id)
+
+
+def _download_failed_text(exc: Exception) -> str:
+    return f"Download failed: {exc}\nUse /retry_failed to retry eligible failed jobs."
 
 
 def _job_filename(job: DownloadJob) -> str:
