@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import http.server
 import logging
+import socketserver
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 from telegram.error import BadRequest
@@ -604,6 +609,48 @@ def test_download_manager_reports_completion_progress(tmp_path: Path) -> None:
     assert progress[0].eta_seconds == 0
 
 
+def test_download_manager_downloads_direct_url(tmp_path: Path) -> None:
+    served_dir = tmp_path / "served"
+    served_dir.mkdir()
+    (served_dir / "direct.txt").write_bytes(b"hello direct")
+    server = _ThreadedHttpServer(served_dir)
+    server.start()
+    progress: list[ProgressSnapshot] = []
+    manager = DownloadManager(
+        bot=FakeBotApiClient(),
+        pyrogram_session=None,
+        download_dir=tmp_path / "downloads",
+        temp_dir=tmp_path / "tmp",
+        logger=logging.getLogger("test"),
+    )
+
+    async def progress_callback(snapshot: ProgressSnapshot) -> None:
+        progress.append(snapshot)
+
+    try:
+        result = asyncio.run(
+            manager.download(
+                file_record_id=1,
+                metadata=_metadata(
+                    telegram_file_id="direct-url:1",
+                    original_name="direct.txt",
+                    size=12,
+                    source_url=f"{server.url}/direct.txt",
+                ),
+                progress_callback=progress_callback,
+            )
+        )
+    finally:
+        server.stop()
+
+    assert result.path.exists()
+    assert result.path.name == "direct.txt"
+    assert result.path.read_bytes() == b"hello direct"
+    assert progress
+    assert progress[-1].current == 12
+    assert progress[-1].total == 12
+
+
 def test_download_manager_reports_bot_api_get_file_failure(tmp_path: Path) -> None:
     bot = FakeBotApiClient()
     bot.fail_get_file = True
@@ -659,21 +706,49 @@ def test_download_manager_cleans_temp_files_on_cancellation(tmp_path: Path) -> N
 
 def _metadata(
     message_id: int = 1,
+    telegram_file_id: str = "bot-api-file-id",
     forward_origin_chat_id: int | None = None,
     forward_origin_message_id: int | None = None,
     telegram_file_unique_id: str | None = None,
+    original_name: str = "example.txt",
+    size: int | None = 5,
+    source_url: str | None = None,
 ) -> FileMetadata:
     return FileMetadata(
-        telegram_file_id="bot-api-file-id",
+        telegram_file_id=telegram_file_id,
         message_id=message_id,
         chat_id=2,
         forward_origin_chat_id=forward_origin_chat_id,
         forward_origin_message_id=forward_origin_message_id,
-        original_name="example.txt",
+        original_name=original_name,
         mime_type="text/plain",
-        size=5,
+        size=size,
         extension=".txt",
         file_type=TelegramFileType.DOCUMENT,
         created_at="2026-07-24T00:00:00+00:00",
         telegram_file_unique_id=telegram_file_unique_id,
+        source_url=source_url,
     )
+
+
+class _ThreadedHttpServer:
+    def __init__(self, directory: Path) -> None:
+        handler = lambda *args, **kwargs: http.server.SimpleHTTPRequestHandler(  # noqa: E731
+            *args,
+            directory=str(directory),
+            **kwargs,
+        )
+        self._server = socketserver.TCPServer(("127.0.0.1", 0), handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        host = cast(str, self._server.server_address[0])
+        port = cast(int, self._server.server_address[1])
+        self.url = f"http://{host}:{port}"
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        with contextlib.suppress(RuntimeError):
+            self._thread.join(timeout=2)

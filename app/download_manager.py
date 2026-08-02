@@ -10,15 +10,21 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from telegram.error import TelegramError as TelegramApiError
 
+from app import constants
 from app.exceptions import DownloadError
 from app.models import DownloadResult, FileMetadata
 from app.progress import ProgressSnapshot
 from app.utils.filesystem import ensure_directory, unique_path
 
 ProgressCallback = Callable[[ProgressSnapshot], Awaitable[None]]
+HTTP_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+HTTP_DOWNLOAD_TIMEOUT_SECONDS = 30
 
 
 class BotApiFile(Protocol):
@@ -110,7 +116,16 @@ class DownloadManager:
         )
 
         try:
-            if metadata.forward_origin_chat_id is not None:
+            if metadata.source_url is not None:
+                result = await self._download_via_direct_url(
+                    file_record_id=file_record_id,
+                    metadata=metadata,
+                    final_path=final_path,
+                    temp_path=temp_path,
+                    started_at=started_at,
+                    progress_callback=progress_callback,
+                )
+            elif metadata.forward_origin_chat_id is not None:
                 if metadata.forward_origin_message_id is None:
                     raise DownloadError("Forward-origin chat id was stored without a message id.")
                 result = await self._download_via_forward_origin(
@@ -648,6 +663,73 @@ class DownloadManager:
         )
         return result
 
+    async def _download_via_direct_url(
+        self,
+        file_record_id: int,
+        metadata: FileMetadata,
+        final_path: Path,
+        temp_path: Path,
+        started_at: float,
+        progress_callback: ProgressCallback | None,
+    ) -> DownloadResult:
+        if metadata.source_url is None:
+            raise DownloadError("Direct download URL is missing.")
+        self._logger.info(
+            "download started",
+            extra={
+                "event": "download_started",
+                "download_source": "direct_url",
+                "file_record_id": file_record_id,
+                "url_host": urlparse(metadata.source_url).netloc,
+                "original_name": metadata.original_name,
+                "size": metadata.size,
+            },
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.to_thread(
+                _stream_direct_url_to_temp_file,
+                url=metadata.source_url,
+                temp_path=temp_path,
+                expected_size=metadata.size,
+                started_at=started_at,
+                progress_callback=progress_callback,
+                loop=loop,
+            )
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            _cleanup_file(temp_path, self._logger)
+            raise DownloadError(f"Direct link download failed: {exc}") from exc
+
+        expected_size = metadata.size or temp_path.stat().st_size
+        _verify_download_size(
+            source_path=temp_path,
+            expected_size=expected_size,
+            file_record_id=file_record_id,
+            download_source="direct_url",
+            logger=self._logger,
+        )
+        result = self._finalize_download(file_record_id, metadata, temp_path, final_path)
+        if progress_callback is not None:
+            await progress_callback(
+                ProgressSnapshot(
+                    current=result.size or expected_size,
+                    total=result.size or expected_size,
+                    speed_bytes_per_second=_speed(result.size, started_at),
+                    eta_seconds=0,
+                )
+            )
+        self._logger.info(
+            "download completed",
+            extra={
+                "event": "download_completed",
+                "download_source": "direct_url",
+                "file_record_id": file_record_id,
+                "path": str(final_path),
+                "size": result.size,
+            },
+        )
+        return result
+
     def _finalize_download(
         self,
         file_record_id: int,
@@ -679,6 +761,8 @@ class DownloadManager:
         return self._temp_dir / f"{final_path.name}.{uuid.uuid4().hex}.part"
 
     def _selected_download_source(self, metadata: FileMetadata) -> str:
+        if metadata.source_url is not None:
+            return "direct_url"
         if (
             metadata.forward_origin_chat_id is not None
             and metadata.forward_origin_message_id is not None
@@ -708,6 +792,65 @@ def _cleanup_file(path: Path, logger: logging.Logger) -> None:
             )
 
 
+def _stream_direct_url_to_temp_file(
+    *,
+    url: str,
+    temp_path: Path,
+    expected_size: int | None,
+    started_at: float,
+    progress_callback: ProgressCallback | None,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    request = Request(url, headers={"User-Agent": f"{constants.APP_NAME}/1.0"})
+    with urlopen(request, timeout=HTTP_DOWNLOAD_TIMEOUT_SECONDS) as response:
+        total = _response_content_length(response.headers.get("Content-Length")) or expected_size
+        if total is not None and total > constants.MAX_UPLOAD_SIZE_BYTES:
+            raise DownloadError(
+                "Direct link is too large. "
+                f"Maximum supported size is {constants.MAX_UPLOAD_SIZE_BYTES} bytes."
+            )
+        ensure_directory(temp_path.parent)
+        current = 0
+        with temp_path.open("wb") as output:
+            while True:
+                chunk = response.read(HTTP_DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                current += len(chunk)
+                if current > constants.MAX_UPLOAD_SIZE_BYTES:
+                    raise DownloadError(
+                        "Direct link is too large. "
+                        f"Maximum supported size is {constants.MAX_UPLOAD_SIZE_BYTES} bytes."
+                    )
+                output.write(chunk)
+                if progress_callback is not None:
+                    _schedule_progress_callback(
+                        progress_callback,
+                        _progress_snapshot(current, total, expected_size, started_at),
+                        loop,
+                    )
+
+
+def _schedule_progress_callback(
+    progress_callback: ProgressCallback,
+    snapshot: ProgressSnapshot,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    def schedule() -> None:
+        asyncio.ensure_future(progress_callback(snapshot))
+
+    loop.call_soon_threadsafe(schedule)
+
+
+def _response_content_length(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def _pyrogram_temp_path(path: Path) -> Path:
     return Path(f"{path}.temp")
 
@@ -733,7 +876,7 @@ def _is_peer_id_invalid(exc: Exception) -> bool:
 
 def _progress_snapshot(
     current: int,
-    total: int,
+    total: int | None,
     metadata_size: int | None,
     started_at: float,
 ) -> ProgressSnapshot:

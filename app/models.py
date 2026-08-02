@@ -28,6 +28,7 @@ class FileMetadata:
     file_type: TelegramFileType
     created_at: str
     telegram_file_unique_id: str | None = None
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)

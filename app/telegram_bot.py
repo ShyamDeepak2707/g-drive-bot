@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import unquote, urlparse
 
 from googleapiclient.errors import HttpError
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -63,6 +65,8 @@ StatusDisplayMode = Literal["mobile", "desktop"]
 STATUS_MOBILE_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━"
 STATUS_DESKTOP_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 DESTINATION_PROMPT_RECENT_LIMIT = 3
+DIRECT_URL_PATTERN = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+DIRECT_URL_TRAILING_PUNCTUATION = ".,);]"
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -159,6 +163,63 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         settings_message.text,
         parse_mode=settings_message.parse_mode,
         disable_web_page_preview=settings_message.disable_web_page_preview,
+    )
+
+
+async def upload_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        _get_logger(context).warning("/upload received without a message or user")
+        return
+
+    source_url = _extract_direct_url_from_command(message, context)
+    if source_url is None:
+        await message.reply_text(
+            "Send /u with a direct download link, or reply /u to a message containing a link."
+        )
+        return
+    if not _is_supported_direct_url(source_url):
+        await message.reply_text("Only http:// and https:// direct download links are supported.")
+        return
+
+    metadata = _direct_url_metadata(source_url, message)
+    repository = _get_repository(context)
+    created_user = repository.create_user(
+        telegram_user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+    )
+    file_record = repository.create_file_record(user_id=created_user.id, metadata=metadata)
+    _get_logger(context).info(
+        "direct url metadata persisted",
+        extra={
+            "event": "direct_url_metadata_persisted",
+            "file_record_id": file_record.id,
+            "chat_id": metadata.chat_id,
+            "message_id": metadata.message_id,
+            "url_host": urlparse(source_url).netloc,
+            "original_name": metadata.original_name,
+        },
+    )
+
+    queue = _get_download_queue(context)
+    if queue is None:
+        await message.reply_text(
+            "Direct link metadata stored, but the download worker is not configured."
+        )
+        return
+
+    ack = await message.reply_text(
+        f"Received direct link. Download queued.\nFile: {metadata.original_name}"
+    )
+    await queue.enqueue(
+        DownloadJob(
+            file_record_id=file_record.id,
+            metadata=metadata,
+            chat_id=message.chat_id,
+            status_message_id=ack.message_id,
+        )
     )
 
 
@@ -428,6 +489,8 @@ def bot_commands() -> tuple[BotCommand, ...]:
         BotCommand(constants.PING_COMMAND, "Check bot responsiveness"),
         BotCommand(constants.ID_COMMAND, "Show your Telegram IDs"),
         BotCommand(constants.SETTINGS_COMMAND, "Show safe runtime settings"),
+        BotCommand(constants.UPLOAD_SHORT_COMMAND, "Upload a direct download link"),
+        BotCommand(constants.UPLOAD_COMMAND, "Upload a direct download link"),
         BotCommand(constants.STATUS_COMMAND, "Show download, upload, and queue status"),
         BotCommand(constants.HEALTH_COMMAND, "Show system health"),
         BotCommand(constants.QUEUES_COMMAND, "Inspect active and queued jobs"),
@@ -475,6 +538,8 @@ def register_handlers(
     application.add_handler(CommandHandler(constants.PING_COMMAND, ping_command))
     application.add_handler(CommandHandler(constants.ID_COMMAND, id_command))
     application.add_handler(CommandHandler(constants.SETTINGS_COMMAND, settings_command))
+    application.add_handler(CommandHandler(constants.UPLOAD_SHORT_COMMAND, upload_url_command))
+    application.add_handler(CommandHandler(constants.UPLOAD_COMMAND, upload_url_command))
     application.add_handler(CommandHandler(constants.CANCEL_COMMAND, cancel_command))
     application.add_handler(CommandHandler(constants.STATUS_COMMAND, status_command))
     application.add_handler(CommandHandler(constants.HEALTH_COMMAND, health_command))
@@ -1464,6 +1529,7 @@ def _format_help_message(*, is_admin: bool) -> TelegramMessage:
     style = _utility_style(icons)
     rows: list[tuple[str, str, object]] = [
         (icons.file, "Send files", "Download, rename, choose folder, upload"),
+        (icons.upload, "/u link", "Download a direct link and upload it"),
         (icons.status, "/status", "Show current pipeline state"),
         (icons.worker, "/cancel", "Cancel the current action"),
         (icons.info, "/id", "Show Telegram user and chat IDs"),
@@ -1893,6 +1959,82 @@ def _folder_list_error_message(exc: HttpError) -> str:
     if status == 404:
         return "I could not find that Drive location. Go back and choose another folder."
     return "I could not load folders from Google Drive right now. Try again later."
+
+
+def _extract_direct_url_from_command(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> str | None:
+    args = getattr(context, "args", None)
+    if args:
+        url = _first_direct_url(" ".join(str(arg) for arg in args))
+        if url is not None:
+            return url
+    command_text = getattr(message, "text", None)
+    if command_text:
+        url = _first_direct_url(command_text)
+        if url is not None:
+            return url
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+    return _first_direct_url(getattr(reply, "text", None) or getattr(reply, "caption", None) or "")
+
+
+def _first_direct_url(text: str) -> str | None:
+    match = DIRECT_URL_PATTERN.search(text)
+    if match is None:
+        return None
+    return match.group(0).rstrip(DIRECT_URL_TRAILING_PUNCTUATION)
+
+
+def _is_supported_direct_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _direct_url_metadata(source_url: str, message: Message) -> FileMetadata:
+    filename = _direct_url_filename(source_url, message.message_id)
+    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return FileMetadata(
+        telegram_file_id=f"direct-url:{message.message_id}",
+        message_id=message.message_id,
+        chat_id=message.chat_id,
+        forward_origin_chat_id=None,
+        forward_origin_message_id=None,
+        original_name=filename,
+        mime_type=mime_type,
+        size=None,
+        extension=Path(filename).suffix or None,
+        file_type=TelegramFileType.DOCUMENT,
+        created_at=utc_now_iso(),
+        source_url=source_url,
+    )
+
+
+def _direct_url_filename(source_url: str, message_id: int) -> str:
+    parsed = urlparse(source_url)
+    raw_name = Path(unquote(parsed.path)).name
+    if not raw_name:
+        raw_name = f"direct-link-{message_id}.bin"
+    sanitized = _sanitize_direct_url_filename(raw_name)
+    if "." not in sanitized:
+        sanitized = f"{sanitized}.bin"
+    return _shorten_filename(sanitized, constants.FILENAME_MAX_LENGTH)
+
+
+def _sanitize_direct_url_filename(value: str) -> str:
+    cleaned = "".join("_" if char in '<>:"/\\|?*\x00' else char for char in value).strip()
+    return cleaned or "download.bin"
+
+
+def _shorten_filename(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    path = Path(value)
+    suffix = path.suffix
+    stem_limit = max(1, limit - len(suffix))
+    return f"{path.stem[:stem_limit]}{suffix}"
 
 
 def _extract_file_metadata(message: Message) -> FileMetadata | None:

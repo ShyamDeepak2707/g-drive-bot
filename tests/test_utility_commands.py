@@ -6,14 +6,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings
+from app.database import DatabaseRepository, SQLiteDatabase
+from app.download_queue import DownloadJob
 from app.telegram_bot import (
     ADMIN_USER_IDS_KEY,
+    DOWNLOAD_QUEUE_KEY,
     LOGGER_KEY,
+    REPOSITORY_KEY,
     SETTINGS_KEY,
     help_command,
     id_command,
     ping_command,
     settings_command,
+    upload_url_command,
 )
 
 
@@ -25,8 +30,17 @@ class Reply:
 
 
 class FakeMessage:
-    def __init__(self, chat_id: int = 456) -> None:
+    def __init__(
+        self,
+        chat_id: int = 456,
+        message_id: int = 10,
+        text: str | None = None,
+        reply_to_message: object | None = None,
+    ) -> None:
         self.chat_id = chat_id
+        self.message_id = message_id
+        self.text = text
+        self.reply_to_message = reply_to_message
         self.replies: list[Reply] = []
 
     async def reply_text(
@@ -34,7 +48,7 @@ class FakeMessage:
         text: str,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
-    ) -> None:
+    ) -> object:
         self.replies.append(
             Reply(
                 text=text,
@@ -42,11 +56,19 @@ class FakeMessage:
                 disable_web_page_preview=disable_web_page_preview,
             )
         )
+        return FakeSentMessage(message_id=100 + len(self.replies))
+
+
+@dataclass
+class FakeSentMessage:
+    message_id: int
 
 
 @dataclass
 class FakeUser:
     id: int
+    username: str | None = None
+    first_name: str | None = None
 
 
 @dataclass
@@ -63,6 +85,15 @@ class FakeApplication:
 @dataclass
 class FakeContext:
     application: FakeApplication
+    args: list[str] | None = None
+
+
+class FakeDownloadQueue:
+    def __init__(self) -> None:
+        self.jobs: list[DownloadJob] = []
+
+    async def enqueue(self, job: DownloadJob) -> None:
+        self.jobs.append(job)
 
 
 def test_help_command_shows_public_commands_for_regular_user() -> None:
@@ -81,6 +112,7 @@ def test_help_command_shows_public_commands_for_regular_user() -> None:
     assert reply.disable_web_page_preview is True
     assert "📊 <b>Help</b>" in reply.text
     assert "📄 <b>Send files</b>: <b>Download, rename, choose folder, upload</b>" in reply.text
+    assert "⬆️ <b>/u link</b>: <b>Download a direct link and upload it</b>" in reply.text
     assert "📊 <b>/status</b>" in reply.text
     assert "/health" not in reply.text
 
@@ -176,10 +208,52 @@ def test_settings_command_shows_safe_runtime_settings_for_admin() -> None:
     assert "api-hash" not in reply.text
 
 
+def test_upload_url_command_queues_direct_link_download(tmp_path: Path) -> None:
+    database = SQLiteDatabase(tmp_path / "app.sqlite3")
+    database.initialize()
+    repository = DatabaseRepository(database)
+    queue = FakeDownloadQueue()
+    message = FakeMessage(
+        chat_id=456,
+        message_id=42,
+        text="/u https://example.com/files/report.pdf",
+    )
+    context = _context(
+        admin_user_ids=(),
+        repository=repository,
+        download_queue=queue,
+        args=["https://example.com/files/report.pdf"],
+    )
+
+    asyncio.run(
+        upload_url_command(
+            FakeUpdate(effective_message=message, effective_user=FakeUser(id=123)),  # type: ignore[arg-type]
+            context,  # type: ignore[arg-type]
+        )
+    )
+
+    assert len(queue.jobs) == 1
+    job = queue.jobs[0]
+    assert job.status_message_id == 101
+    metadata = job.metadata
+    assert metadata.source_url == "https://example.com/files/report.pdf"
+    assert metadata.original_name == "report.pdf"
+    records = repository.list_failed_file_records(limit=10)
+    assert records == ()
+    file_record = repository.get_file_record(job.file_record_id)
+    assert file_record is not None
+    assert file_record.source_url == "https://example.com/files/report.pdf"
+    assert "Received direct link. Download queued." in message.replies[0].text
+    database.close()
+
+
 def _context(
     *,
     admin_user_ids: tuple[int, ...],
     settings: Settings | None = None,
+    repository: DatabaseRepository | None = None,
+    download_queue: FakeDownloadQueue | None = None,
+    args: list[str] | None = None,
 ) -> FakeContext:
     bot_data: dict[str, object] = {
         ADMIN_USER_IDS_KEY: admin_user_ids,
@@ -187,10 +261,15 @@ def _context(
     }
     if settings is not None:
         bot_data[SETTINGS_KEY] = settings
+    if repository is not None:
+        bot_data[REPOSITORY_KEY] = repository
+    if download_queue is not None:
+        bot_data[DOWNLOAD_QUEUE_KEY] = download_queue
     return FakeContext(
         application=FakeApplication(
             bot_data=bot_data,
-        )
+        ),
+        args=args,
     )
 
 

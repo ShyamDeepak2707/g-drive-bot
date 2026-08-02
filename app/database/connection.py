@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS files (
     user_id INTEGER NOT NULL,
     telegram_file_id TEXT NOT NULL,
     telegram_file_unique_id TEXT,
+    source_url TEXT,
     message_id INTEGER,
     chat_id INTEGER,
     forward_origin_chat_id INTEGER,
@@ -115,6 +116,7 @@ CREATE TABLE IF NOT EXISTS user_folder_preferences (
 
 FILE_COLUMN_MIGRATIONS = {
     "telegram_file_unique_id": "ALTER TABLE files ADD COLUMN telegram_file_unique_id TEXT",
+    "source_url": "ALTER TABLE files ADD COLUMN source_url TEXT",
     "message_id": "ALTER TABLE files ADD COLUMN message_id INTEGER",
     "chat_id": "ALTER TABLE files ADD COLUMN chat_id INTEGER",
     "forward_origin_chat_id": "ALTER TABLE files ADD COLUMN forward_origin_chat_id INTEGER",

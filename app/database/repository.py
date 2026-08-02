@@ -44,6 +44,7 @@ class FileRecord:
     user_id: int
     telegram_file_id: str
     telegram_file_unique_id: str | None
+    source_url: str | None
     message_id: int | None
     chat_id: int | None
     forward_origin_chat_id: int | None
@@ -171,16 +172,17 @@ class DatabaseRepository:
         cursor = self._database.execute(
             """
             INSERT INTO files (
-                user_id, telegram_file_id, telegram_file_unique_id, message_id, chat_id,
+                user_id, telegram_file_id, telegram_file_unique_id, source_url, message_id, chat_id,
                 forward_origin_chat_id, forward_origin_message_id, original_name,
                 mime_type, size, extension, file_type, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
                 metadata.telegram_file_id,
                 metadata.telegram_file_unique_id,
+                metadata.source_url,
                 metadata.message_id,
                 metadata.chat_id,
                 metadata.forward_origin_chat_id,
@@ -1058,7 +1060,7 @@ class DatabaseRepository:
 
 
 _FILE_SELECT_SQL = """
-SELECT id, user_id, telegram_file_id, telegram_file_unique_id, message_id, chat_id,
+SELECT id, user_id, telegram_file_id, telegram_file_unique_id, source_url, message_id, chat_id,
        forward_origin_chat_id, forward_origin_message_id, google_drive_file_id,
        upload_retry_count, upload_retry_after, upload_error_message,
        destination_folder_id, destination_folder_name, destination_folder_path,
@@ -1074,6 +1076,7 @@ def _file_record_from_row(row: sqlite3.Row) -> FileRecord:
         user_id=int(row["user_id"]),
         telegram_file_id=row["telegram_file_id"],
         telegram_file_unique_id=row["telegram_file_unique_id"],
+        source_url=row["source_url"],
         message_id=row["message_id"],
         chat_id=row["chat_id"],
         forward_origin_chat_id=row["forward_origin_chat_id"],

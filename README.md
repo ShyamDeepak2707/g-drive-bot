@@ -373,6 +373,8 @@ Operational admin commands emit structured audit logs for retry, cleanup, shutdo
 | `/help` | Show available user and admin commands. |
 | `/ping` | Check whether the bot is responsive. |
 | `/id` | Show Telegram user and chat IDs. |
+| `/u <direct-link>` | Download a direct HTTP/HTTPS link and continue the Drive upload flow. |
+| `/upload <direct-link>` | Same as `/u`; also works when replying to a message containing a link. |
 | `/status` | Show current download, upload, queue, and worker status. |
 | `/cancel` | Cancel the current user action or active download flow. |
 
