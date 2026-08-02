@@ -205,30 +205,44 @@ def _modern_progress_card(
     resolved_percent = _clamp_percent(percent)
     separator = style.progress_separator
     lines = [
-        f"<b>{_html(title)}</b>",
+        _progress_title_line(title, filename, max_filename_length),
         "",
-        separator,
-        "",
-        f"{style.icons.file} <b>{_html(_truncate_filename(filename, max_filename_length))}</b>",
+        f"{_progress_bar(resolved_percent, bar_segments)} <b>{resolved_percent}%</b>",
     ]
-    total_line = _format_total_size(total_size)
-    if total_line is not None:
-        lines.append(f"{style.icons.storage} {_html(total_line)}")
-    lines.extend(
-        ("", f"{_progress_bar(resolved_percent, bar_segments)} <b>{resolved_percent}%</b>")
-    )
+    if speed:
+        lines.append(f"{style.icons.speed} <b>Speed:</b> {_html(speed)}")
     transferred = _format_transfer(transferred_size, total_size)
     if transferred is not None:
-        lines.append(f"{style.icons.storage} {_html(transferred)}")
-    if speed:
-        lines.append(f"{style.icons.speed} {_html(speed)}")
+        lines.append(f"🔄 <b>Done:</b> {_html(transferred.replace(' / ', ' of '))}")
     if eta:
-        lines.append(f"{style.icons.eta} {_html(eta)} remaining")
+        lines.append(f"⏳ <b>ETA:</b> {_html(eta)}")
     if status_text:
-        lines.append(_html(status_text))
+        lines.append(f"{style.icons.info} <b>Status:</b> {_html(status_text)}")
     if footer:
         lines.extend(("", separator, _html(footer)))
     return TelegramMessage(text="\n".join(lines))
+
+
+def _progress_title_line(title: str, filename: str, max_filename_length: int) -> str:
+    label = _progress_title_label(title)
+    return (
+        f"{_html(_progress_title_icon(title))} <b>{_html(label)}:</b> "
+        f"{_html(_truncate_filename(filename, max_filename_length))}"
+    )
+
+
+def _progress_title_icon(title: str) -> str:
+    parts = title.strip().split(maxsplit=1)
+    return parts[0] if parts and not parts[0].isascii() else "📄"
+
+
+def _progress_title_label(title: str) -> str:
+    cleaned = " ".join(title.strip().split())
+    for icon in ("📥", "⬆️", "✅"):
+        cleaned = cleaned.replace(icon, "").strip()
+    if cleaned.lower().endswith("ing"):
+        cleaned = cleaned[:-3]
+    return cleaned or "Progress"
 
 
 def status_card(

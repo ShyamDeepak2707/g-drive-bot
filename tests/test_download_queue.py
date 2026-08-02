@@ -659,14 +659,13 @@ def test_download_queue_throttles_progress_persistence(tmp_path: Path) -> None:
     assert repository.progress_update_count <= 2
     assert repository.progress_update_count < 50
     assert queue.status(file_record.id) == DownloadJobStatus.COMPLETED
-    progress_edits = [edit for edit in bot.edits if "<b>📥 Downloading</b>" in edit]
+    progress_edits = [edit for edit in bot.edits if "📥 <b>Download:</b>" in edit]
     assert progress_edits
     assert any("████████████████████ <b>100%</b>" in edit for edit in progress_edits)
-    assert any("📄 <b>example.txt</b>" in edit for edit in progress_edits)
-    assert any("💾 Total: 50 B" in edit for edit in progress_edits)
-    assert any("💾 50 B / 50 B" in edit for edit in progress_edits)
-    assert any("🚀 1000 B/s" in edit for edit in progress_edits)
-    assert any("⏱ 0s remaining" in edit for edit in progress_edits)
+    assert any("📥 <b>Download:</b> example.txt" in edit for edit in progress_edits)
+    assert any("🔄 <b>Done:</b> 50 B of 50 B" in edit for edit in progress_edits)
+    assert any("🚀 <b>Speed:</b> 1000 B/s" in edit for edit in progress_edits)
+    assert any("⏳ <b>ETA:</b> 0s" in edit for edit in progress_edits)
     assert any("🕒 Updated just now" in edit for edit in progress_edits)
     assert any(kwargs.get("parse_mode") == "HTML" for kwargs in bot.edit_kwargs)
     assert len(bot.messages) == 1

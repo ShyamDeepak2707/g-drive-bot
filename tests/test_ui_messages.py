@@ -66,15 +66,13 @@ def test_modern_progress_card_formats_zero_percent() -> None:
     )
 
     assert message.parse_mode == "HTML"
-    assert "<b>📥 Downloading</b>" in message.text
+    assert "📥 <b>Download:</b> ubuntu.iso" in message.text
     assert "━━━━━━━━━━━━━━━━━━━━" in message.text
-    assert "📄 <b>ubuntu.iso</b>" in message.text
-    assert "💾 Total: 1.36 GB" in message.text
     assert "──────────────────── <b>0%</b>" in message.text
-    assert "💾 0 MB / 1.36 GB" in message.text
-    assert "🚀 2.4 MB/s" in message.text
-    assert "⏱ 4m 12s remaining" in message.text
-    assert "Starting" in message.text
+    assert "🔄 <b>Done:</b> 0 MB of 1.36 GB" in message.text
+    assert "🚀 <b>Speed:</b> 2.4 MB/s" in message.text
+    assert "⏳ <b>ETA:</b> 4m 12s" in message.text
+    assert "ℹ️ <b>Status:</b> Starting" in message.text
     assert "🕒 Updated just now" in message.text
 
 
@@ -112,8 +110,8 @@ def test_modern_progress_card_omits_missing_speed() -> None:
         eta="6m",
     )
 
-    assert "🚀" not in message.text
-    assert "⏱ 6m remaining" in message.text
+    assert "🚀 <b>Speed:</b>" not in message.text
+    assert "⏳ <b>ETA:</b> 6m" in message.text
 
 
 def test_modern_progress_card_omits_missing_eta() -> None:
@@ -126,8 +124,8 @@ def test_modern_progress_card_omits_missing_eta() -> None:
         speed="2.4 MB/s",
     )
 
-    assert "🚀 2.4 MB/s" in message.text
-    assert "⏱" not in message.text
+    assert "🚀 <b>Speed:</b> 2.4 MB/s" in message.text
+    assert "⏳ <b>ETA:</b>" not in message.text
 
 
 def test_modern_progress_card_truncates_long_filenames_cleanly() -> None:
@@ -144,7 +142,7 @@ def test_modern_progress_card_truncates_long_filenames_cleanly() -> None:
     assert filename not in message.text
     assert "....mkv" not in message.text
     assert "very-long-linux-distribution-i...mkv" in message.text
-    assert "📄 <b>very-long-linux-distribution-i...mkv</b>" in message.text
+    assert "📥 <b>Download:</b> very-long-linux-distribution-i...mkv" in message.text
 
 
 def test_status_card_bolds_labels_and_values() -> None:

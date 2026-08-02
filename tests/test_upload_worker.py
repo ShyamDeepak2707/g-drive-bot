@@ -329,8 +329,8 @@ def test_upload_worker_edits_upload_progress_message(tmp_path: Path) -> None:
     asyncio.run(worker.run_once())
 
     texts = [str(message["text"]) for message in bot.messages]
-    assert any("⬆️ Uploading" in text and "<b>0%</b>" in text for text in texts)
-    assert any("⬆️ Uploading" in text and "<b>100%</b>" in text for text in texts)
+    assert any("⬆️ <b>Upload:</b>" in text and "<b>0%</b>" in text for text in texts)
+    assert any("⬆️ <b>Upload:</b>" in text and "<b>100%</b>" in text for text in texts)
     assert any("✅ Done" in text for text in texts)
     assert any("Drive file ID: drive-file-id" in text for text in texts)
     assert any("Destination: My Drive/Uploads" in text for text in texts)
@@ -374,7 +374,7 @@ def test_upload_worker_delays_upload_progress_card(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
 
-    assert "⬆️ Uploading" in str(bot.messages[0]["text"])
+    assert "⬆️ <b>Upload:</b>" in str(bot.messages[0]["text"])
     assert bot.messages[0]["message_id"] == 1000
     database.close()
 
@@ -406,7 +406,7 @@ def test_upload_worker_sends_completion_card_when_upload_finishes_before_delay(
     asyncio.run(worker.run_once())
 
     assert len(bot.messages) == 1
-    assert "⬆️ Uploading" in str(bot.messages[0]["text"])
+    assert "⬆️ <b>Upload:</b>" in str(bot.messages[0]["text"])
     assert "<b>100%</b>" in str(bot.messages[0]["text"])
     assert "✅ Done" in str(bot.messages[0]["text"])
     database.close()
