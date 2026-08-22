@@ -65,6 +65,22 @@ def test_run_health_check_uses_read_only_database_without_creating_missing_file(
     assert not missing_database.exists()
 
 
+def test_health_check_accepts_pyrogram_session_string(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _healthy_env(tmp_path)
+    env["PYROGRAM_SESSION_STRING"] = "session-string"
+    _create_database(Path(env["SQLITE_DB_PATH"]))
+    _create_runtime_files(env, create_pyrogram_session=False)
+    monkeypatch.setattr("app.cli._application_process_running", lambda: True)
+
+    result = run_health_check(env)
+
+    assert result.snapshot.pyrogram_connected is True
+    assert "Pyrogram" not in result.failures
+
+
 def _healthy_env(tmp_path: Path) -> dict[str, str]:
     return {
         "TELEGRAM_BOT_TOKEN": "123456789:abcdefghijklmnopqrstuvwxyzABCDE",
@@ -82,12 +98,13 @@ def _create_database(path: Path) -> None:
     database.close()
 
 
-def _create_runtime_files(env: dict[str, str]) -> None:
+def _create_runtime_files(env: dict[str, str], *, create_pyrogram_session: bool = True) -> None:
     credentials = Path(env["GOOGLE_CREDENTIALS_FILE"])
     token = Path(env["GOOGLE_TOKEN_FILE"])
     session = Path(env["PYROGRAM_WORKDIR"]) / f"{env['PYROGRAM_SESSION_NAME']}.session"
     credentials.parent.mkdir(parents=True, exist_ok=True)
-    session.parent.mkdir(parents=True, exist_ok=True)
     credentials.write_text("{}", encoding="utf-8")
     token.write_text("{}", encoding="utf-8")
-    session.write_bytes(b"session")
+    if create_pyrogram_session:
+        session.parent.mkdir(parents=True, exist_ok=True)
+        session.write_bytes(b"session")

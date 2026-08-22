@@ -226,7 +226,8 @@ Then edit `.env` with your own values. Do not commit `.env`, session files, OAut
 | `PYROGRAM_SESSION_NAME` | No | `g_drive_bot` | Pyrogram session name. |
 | `PYROGRAM_WORKDIR` | No | `sessions` | Directory where the Pyrogram session is stored. |
 | `PYROGRAM_MAX_CONCURRENT_TRANSMISSIONS` | No | `4` | Pyrogram transfer concurrency. |
-| `PYROGRAM_SESSION_BASE64` | No | Empty | Base64-encoded Pyrogram `.session` file for cloud deployments. |
+| `PYROGRAM_SESSION_STRING` | No | Empty | Preferred Pyrogram user session string for cloud deployments. |
+| `PYROGRAM_SESSION_BASE64` | No | Empty | Backward-compatible Base64-encoded Pyrogram `.session` file. Ignored when `PYROGRAM_SESSION_STRING` is set. |
 | `GOOGLE_CREDENTIALS_FILE` | Yes in production | `credentials.json` | Google OAuth client credentials file. |
 | `GOOGLE_TOKEN_FILE` | Yes after auth | `data/token.json` | Google OAuth token cache. |
 | `GOOGLE_SCOPES` | No | `https://www.googleapis.com/auth/drive` | Comma-separated Google OAuth scopes. Full Drive scope is required for folder browsing and selecting arbitrary destination folders. |
@@ -310,9 +311,16 @@ Attach a persistent disk mounted at `/data`. The app can materialize sensitive f
 
 - `GOOGLE_CREDENTIALS_BASE64` writes `/data/credentials.json`.
 - `GOOGLE_TOKEN_BASE64` writes `/data/token.json`.
-- `PYROGRAM_SESSION_BASE64` writes `/data/sessions/g_drive_bot.session`.
+- `PYROGRAM_SESSION_STRING` is used directly for the Pyrogram user session and avoids cloud environment variable size limits.
+- `PYROGRAM_SESSION_BASE64` writes `/data/sessions/g_drive_bot.session` as a backward-compatible fallback.
 
 When these variables are absent, local file-based behavior is unchanged.
+
+Generate the Pyrogram user session string locally after authorizing `sessions/g_drive_bot.session`:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\export_pyrogram_session_string.py
+```
 
 Generate Base64 values on Windows PowerShell:
 
@@ -341,7 +349,7 @@ DOWNLOADS_DIR=/data/downloads
 TEMP_DIR=/data/temp
 GOOGLE_CREDENTIALS_BASE64=<base64 credentials.json>
 GOOGLE_TOKEN_BASE64=<base64 data/token.json>
-PYROGRAM_SESSION_BASE64=<base64 g_drive_bot.session>
+PYROGRAM_SESSION_STRING=<pyrogram user session string>
 ```
 
 Generate `data/token.json` locally first by authorizing with `GOOGLE_AUTO_AUTH=true`, then set `GOOGLE_AUTO_AUTH=false` in Render. Never commit credentials, tokens, or session files.

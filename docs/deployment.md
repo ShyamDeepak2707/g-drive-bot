@@ -6,7 +6,7 @@ This project ships as a single Docker service for the Telegram to Google Drive b
 
 - Docker with Docker Compose support.
 - A valid `.env` file based on `.env.example`.
-- A Pyrogram user session already authorized under the configured `PYROGRAM_WORKDIR`.
+- A Pyrogram user session string, or a user session already authorized under the configured `PYROGRAM_WORKDIR`.
 - Google Drive OAuth files in `./data`:
   - `credentials.json`
   - `token.json`
@@ -32,6 +32,7 @@ Edit `.env` and set:
 - `TELEGRAM_BOT_TOKEN`
 - `PYROGRAM_API_ID`
 - `PYROGRAM_API_HASH`
+- `PYROGRAM_SESSION_STRING` for cloud deployments, or `PYROGRAM_SESSION_NAME` and `PYROGRAM_WORKDIR` for local file-based sessions
 - Google Drive paths, if you are not using the defaults
 
 Place Google Drive OAuth files at:

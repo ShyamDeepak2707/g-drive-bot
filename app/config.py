@@ -42,6 +42,8 @@ class Settings:
     folder_browser_page_size: int
     folder_browser_cache_ttl_seconds: int
     folder_recent_limit: int
+    pyrogram_session_string: str | None = None
+    pyrogram_session_mode: str = "local_session_file"
 
 
 def load_settings(dotenv_path: Path | None = None) -> Settings:
@@ -56,7 +58,15 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
     google_scopes = parse_csv(os.getenv("GOOGLE_SCOPES"), constants.DEFAULT_GOOGLE_SCOPES)
     google_credentials_base64_present = _env_has_value("GOOGLE_CREDENTIALS_BASE64")
     google_token_base64_present = _env_has_value("GOOGLE_TOKEN_BASE64")
-    pyrogram_session_base64_present = _env_has_value("PYROGRAM_SESSION_BASE64")
+    pyrogram_session_string_present = _env_has_value("PYROGRAM_SESSION_STRING")
+    pyrogram_session_base64_present = (
+        _env_has_value("PYROGRAM_SESSION_BASE64") and not pyrogram_session_string_present
+    )
+    pyrogram_session_mode = (
+        "session_string"
+        if pyrogram_session_string_present
+        else "base64_session_file" if pyrogram_session_base64_present else "local_session_file"
+    )
 
     settings = Settings(
         app_env=app_env,
@@ -114,6 +124,8 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
             "FOLDER_RECENT_LIMIT",
             constants.FOLDER_RECENT_LIMIT,
         ),
+        pyrogram_session_string=_none_if_blank(os.getenv("PYROGRAM_SESSION_STRING")),
+        pyrogram_session_mode=pyrogram_session_mode,
     )
     validate_settings(settings)
     return settings

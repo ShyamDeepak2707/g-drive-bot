@@ -68,15 +68,24 @@ def create_pyrogram_client(settings: Settings) -> PyrogramSessionManager | None:
     from pyrogram import Client
 
     settings.pyrogram_workdir.mkdir(parents=True, exist_ok=True)
-    client = Client(
-        name=settings.pyrogram_session_name,
-        api_id=settings.pyrogram_api_id,
-        api_hash=settings.pyrogram_api_hash,
-        no_updates=True,
-        max_concurrent_transmissions=settings.pyrogram_max_concurrent_transmissions,
-        workdir=str(settings.pyrogram_workdir),
+    client_kwargs: dict[str, Any] = {
+        "name": settings.pyrogram_session_name,
+        "api_id": settings.pyrogram_api_id,
+        "api_hash": settings.pyrogram_api_hash,
+        "no_updates": True,
+        "max_concurrent_transmissions": settings.pyrogram_max_concurrent_transmissions,
+        "workdir": str(settings.pyrogram_workdir),
+    }
+    if settings.pyrogram_session_string is not None:
+        client_kwargs["session_string"] = settings.pyrogram_session_string
+    client = Client(**client_kwargs)
+    logger.info(
+        "Pyrogram user session initialized but not started",
+        extra={
+            "event": "pyrogram_user_session_initialized",
+            "session_mode": settings.pyrogram_session_mode,
+        },
     )
-    logger.info("Pyrogram user session initialized but not started")
     return PyrogramSessionManager(client=client, logger=logger)
 
 

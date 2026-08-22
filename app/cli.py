@@ -212,6 +212,8 @@ def _container_startup_time(now: datetime) -> datetime:
 
 
 def _pyrogram_session_exists(env: Mapping[str, str]) -> bool:
+    if _env_has_value(env, "PYROGRAM_SESSION_STRING"):
+        return True
     if _env_has_value(env, "PYROGRAM_SESSION_BASE64"):
         workdir = Path(constants.CLOUD_PYROGRAM_WORKDIR)
         session_name = constants.CLOUD_PYROGRAM_SESSION_NAME

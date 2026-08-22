@@ -14,6 +14,7 @@ from app.exceptions import StartupValidationError
 GOOGLE_CREDENTIALS_BASE64_ENV = "GOOGLE_CREDENTIALS_BASE64"
 GOOGLE_TOKEN_BASE64_ENV = "GOOGLE_TOKEN_BASE64"
 PYROGRAM_SESSION_BASE64_ENV = "PYROGRAM_SESSION_BASE64"
+PYROGRAM_SESSION_STRING_ENV = "PYROGRAM_SESSION_STRING"
 
 
 @dataclass(frozen=True)
@@ -44,12 +45,16 @@ def materialize_cloud_credentials(
         label="Google token file",
         logger=logger,
     )
-    pyrogram_session_written = _materialize_if_present(
-        env=values,
-        env_name=PYROGRAM_SESSION_BASE64_ENV,
-        destination=settings.pyrogram_workdir / f"{settings.pyrogram_session_name}.session",
-        label="Pyrogram session file",
-        logger=logger,
+    pyrogram_session_written = (
+        False
+        if _env_has_value(values, PYROGRAM_SESSION_STRING_ENV)
+        else _materialize_if_present(
+            env=values,
+            env_name=PYROGRAM_SESSION_BASE64_ENV,
+            destination=settings.pyrogram_workdir / f"{settings.pyrogram_session_name}.session",
+            label="Pyrogram session file",
+            logger=logger,
+        )
     )
     return CloudCredentialMaterializationSummary(
         google_credentials_written=google_credentials_written,
@@ -91,6 +96,11 @@ def _materialize_if_present(
             },
         )
     return True
+
+
+def _env_has_value(env: Mapping[str, str], name: str) -> bool:
+    value = env.get(name)
+    return value is not None and value.strip() != ""
 
 
 def _decode_base64_env_var(value: str, env_name: str) -> bytes:

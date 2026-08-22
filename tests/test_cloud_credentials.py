@@ -31,6 +31,23 @@ def test_materialize_cloud_credentials_writes_valid_base64(tmp_path: Path) -> No
     ).read_bytes() == b"session-bytes"
 
 
+def test_materialize_cloud_credentials_skips_user_session_base64_when_string_present(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+
+    summary = materialize_cloud_credentials(
+        settings,
+        env={
+            "PYROGRAM_SESSION_STRING": "session-string",
+            "PYROGRAM_SESSION_BASE64": _encode(b"session-bytes"),
+        },
+    )
+
+    assert summary.pyrogram_session_written is False
+    assert not (settings.pyrogram_workdir / f"{settings.pyrogram_session_name}.session").exists()
+
+
 def test_materialize_cloud_credentials_rejects_invalid_base64(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
@@ -96,6 +113,25 @@ def test_load_settings_uses_cloud_paths_when_base64_env_is_present(
     assert settings.google_token_file == Path(constants.CLOUD_GOOGLE_TOKEN_FILE)
     assert settings.pyrogram_workdir == Path(constants.CLOUD_PYROGRAM_WORKDIR)
     assert settings.pyrogram_session_name == constants.CLOUD_PYROGRAM_SESSION_NAME
+    assert settings.pyrogram_session_mode == "base64_session_file"
+    assert settings.pyrogram_session_string is None
+
+
+def test_load_settings_uses_session_string_before_base64(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_minimum_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYROGRAM_SESSION_STRING", "session-string")
+    monkeypatch.setenv("PYROGRAM_SESSION_BASE64", _encode(b"session"))
+    monkeypatch.setenv("PYROGRAM_SESSION_NAME", "local-session")
+    monkeypatch.setenv("PYROGRAM_WORKDIR", str(tmp_path / "local-sessions"))
+
+    settings = load_settings(dotenv_path=tmp_path / ".env.missing")
+
+    assert settings.pyrogram_session_string == "session-string"
+    assert settings.pyrogram_session_mode == "session_string"
+    assert settings.pyrogram_workdir == tmp_path / "local-sessions"
+    assert settings.pyrogram_session_name == "local-session"
 
 
 def test_load_settings_keeps_existing_local_file_behavior_when_base64_env_absent(
@@ -119,6 +155,8 @@ def test_load_settings_keeps_existing_local_file_behavior_when_base64_env_absent
     assert settings.google_token_file == tmp_path / "tokens" / "token.json"
     assert settings.pyrogram_workdir == tmp_path / "local-sessions"
     assert settings.pyrogram_session_name == "local-session"
+    assert settings.pyrogram_session_mode == "local_session_file"
+    assert settings.pyrogram_session_string is None
 
 
 def _encode(value: bytes) -> str:

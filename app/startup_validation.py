@@ -264,7 +264,8 @@ async def _validate_pyrogram_session(pyrogram_client: PyrogramSession | None) ->
     if pyrogram_client is None:
         raise StartupValidationError(
             "Pyrogram session is required. Set PYROGRAM_API_ID and PYROGRAM_API_HASH, "
-            "then authorize the configured PYROGRAM_SESSION_NAME as a user session."
+            "then configure PYROGRAM_SESSION_STRING or authorize the configured "
+            "PYROGRAM_SESSION_NAME as a user session."
         )
     try:
         await pyrogram_client.start()
